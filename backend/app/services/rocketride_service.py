@@ -179,12 +179,11 @@ class RocketRideService:
         self.uri = uri
         self.apikey = apikey
         self.pipeline_path = pipeline_path
-        self.confidence_threshold = confidence_threshold or float(
-            os.getenv("CONFIDENCE_THRESHOLD", "0.85")
-        )
-        self.high_value_threshold_inr = high_value_threshold_inr or float(
-            os.getenv("HIGH_VALUE_THRESHOLD_INR", "50000")
-        )
+        raw_conf = os.getenv("CONFIDENCE_THRESHOLD")
+        self.confidence_threshold = confidence_threshold or (float(raw_conf) if raw_conf and raw_conf.strip() else 0.85)
+
+        raw_high = os.getenv("HIGH_VALUE_THRESHOLD_INR")
+        self.high_value_threshold_inr = high_value_threshold_inr or (float(raw_high) if raw_high and raw_high.strip() else 50000.0)
         self._openai_key: str = os.getenv("OPENAI_API_KEY", "")
 
     def _load_pipeline_with_key(self) -> Dict[str, Any]:
