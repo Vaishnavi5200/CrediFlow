@@ -10,7 +10,9 @@ import {
 } from 'lucide-react';
 import confetti from 'canvas-confetti';
 
-const API_BASE = 'http://localhost:8000/api';
+const API_BASE = typeof window !== 'undefined' && (window.location.hostname === 'localhost' || window.location.hostname === '127.0.0.1')
+  ? (window.location.port === '3000' ? 'http://localhost:8000/api' : '/api')
+  : '/api';
 
 export default function App() {
   const [viewMode, setViewMode] = useState('workflow'); // 'workflow' | 'dashboard'
