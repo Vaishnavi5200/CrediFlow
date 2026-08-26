@@ -1,0 +1,221 @@
+{
+  "components": [
+    {
+      "id": "chat_input",
+      "provider": "chat",
+      "name": "Mismatch Input",
+      "config": {
+        "hideForm": true,
+        "mode": "Source",
+        "parameters": {},
+        "type": "chat",
+        "name": "Mismatch Input"
+      },
+      "ui": {
+        "position": {
+          "x": 60,
+          "y": 300
+        },
+        "measured": {
+          "width": 150,
+          "height": 68
+        },
+        "nodeType": "default",
+        "formDataValid": true
+      }
+    },
+    {
+      "id": "prompt_classifier",
+      "provider": "prompt",
+      "name": "Classifier Prompt",
+      "config": {
+        "instructions": [
+          "You are Agent A: GST Mismatch Root-Cause Classifier for CrediFlow.\n\nYou will receive a structured JSON record from the deterministic reconciliation engine. It contains ONLY factual data: invoice number, supplier GSTIN, mismatch type, taxable value, tax amounts (IGST/CGST/SGST), and ITC exposure in INR. You did NOT compute these numbers — they are pre-computed deterministically.\n\nYour sole task: classify the root cause.\n\nUse EXACTLY ONE of these root-cause codes:\n- B2B_FILED_AS_B2C: Vendor filed a B2B invoice as B2C in their GSTR-1 (no GSTIN listed for buyer)\n- TIMING_DIFFERENCE: Invoice exists in GSTR-2B but in a different return period (monthly vs quarterly filing)\n- GSTIN_TYPO_OR_MISMATCH: Wrong or misspelled GSTIN on the invoice or portal filing\n- RATE_OR_VALUE_DISCREPANCY: Tax rate or invoice value differs between PR and GSTR-2B\n- INVOICE_MISSING_IN_2B: Invoice not found in GSTR-2B at all\n- DUPLICATE_INVOICE: Same invoice number appears more than once\n- HSN_TAX_RATE_MISMATCH: HSN code or applicable GST tax rate is wrong\n- MALFORMED_INPUT: Data is corrupt, unparseable, or critically incomplete\n\nProvide your response as valid JSON ONLY (no markdown, no explanation outside the JSON):\n{\"root_cause_code\": \"<CODE>\", \"confidence\": <0.0-1.0>, \"reasoning\": \"<2-3 sentences citing specific record fields>\", \"recommended_action\": \"<1-2 sentences for the vendor>\"}"
+        ],
+        "name": "Classifier Prompt"
+      },
+      "ui": {
+        "position": {
+          "x": 280,
+          "y": 160
+        },
+        "measured": {
+          "width": 150,
+          "height": 68
+        },
+        "nodeType": "default",
+        "formDataValid": true
+      },
+      "input": [
+        {
+          "lane": "questions",
+          "from": "chat_input"
+        }
+      ]
+    },
+    {
+      "id": "agent_classifier",
+      "provider": "agent_deepagent",
+      "name": "Agent A: Classifier",
+      "config": {
+        "default": {
+          "advanced_mode": true,
+          "agent_description": "GST mismatch root-cause classifier. Reads the deterministic reconciliation record and assigns an exact root-cause code with confidence score and actionable reasoning. Never computes tax amounts.",
+          "system_prompt": "You are Agent A: GST Mismatch Root-Cause Classifier for CrediFlow, an MSME GST compliance system operating under India's Rule 60 CGST zero-mismatch policy.\n\nYou receive a deterministic reconciliation record in JSON. Your ONLY job is to classify the root cause. You NEVER compute tax amounts or ITC exposure — those are pre-computed and provided to you.\n\nAlways output valid JSON only (no markdown fences):\n{\"root_cause_code\": \"<CODE>\", \"confidence\": <0.0-1.0>, \"reasoning\": \"<2-3 sentences citing specific record fields>\", \"recommended_action\": \"<1-2 sentences for the vendor>\"}"
+        },
+        "name": "Agent A: Classifier"
+      },
+      "ui": {
+        "position": {
+          "x": 500,
+          "y": 160
+        },
+        "measured": {
+          "width": 150,
+          "height": 88
+        },
+        "nodeType": "default",
+        "formDataValid": true
+      },
+      "input": [
+        {
+          "lane": "questions",
+          "from": "prompt_classifier"
+        }
+      ]
+    },
+    {
+      "id": "llm_classifier",
+      "provider": "llm_openai",
+      "name": "OpenAI (Classifier)",
+      "config": {
+        "profile": "openai-5-2",
+        "openai-5-2": {
+          "apikey": ""
+        },
+        "name": "OpenAI (Classifier)"
+      },
+      "ui": {
+        "position": {
+          "x": 720,
+          "y": 60
+        },
+        "measured": {
+          "width": 150,
+          "height": 68
+        },
+        "nodeType": "default",
+        "formDataValid": true
+      },
+      "control": [
+        {
+          "classType": "llm",
+          "from": "agent_classifier"
+        }
+      ]
+    },
+    {
+      "id": "prompt_auditor",
+      "provider": "prompt",
+      "name": "Auditor Prompt",
+      "config": {
+        "instructions": [
+          "You are Agent B: Independent GST Audit Cross-Examiner for CrediFlow.\n\nYou will receive TWO inputs combined:\n1. ORIGINAL DETERMINISTIC MISMATCH RECORD: The raw factual data from the reconciliation engine (invoice numbers, amounts, GSTIN, HSN codes, ITC exposure).\n2. AGENT A CLASSIFICATION: The root-cause code, confidence, and reasoning from Agent A.\n\nYour role is ADVERSARIAL INDEPENDENT AUDIT — not summarization. You must:\n\nSTEP 1 — INDEPENDENT ANALYSIS: Read the original mismatch record yourself, before considering Agent A. What does the raw data tell you about the root cause under Indian GST law (CGST Act 2017, Rule 60, GSTR-2B matching rules, Section 16(2))?\n\nSTEP 2 — CROSS-EXAMINATION: Compare your independent analysis to Agent A's classification. Does the evidence support it? Are there alternative explanations Agent A missed or mischaracterized?\n\nSTEP 3 — AUDIT VERDICT: Issue your verdict.\n\nIf Agent A is wrong, say DISAGREE and explain why. If partially correct, say PARTIALLY_AGREE. If confirmed, say AGREE — but with independent reasoning, not merely restating Agent A.\n\nRespond with valid JSON ONLY (no markdown):\n{\"audit_verdict\": \"AGREE\", \"auditor_root_cause_code\": \"<CODE>\", \"auditor_confidence\": <0.0-1.0>, \"independent_analysis\": \"<your reading of raw data before Agent A>\", \"cross_examination\": \"<specific critique or confirmation citing exact fields>\", \"final_recommendation\": \"<what Finance Manager should do next>\"}"
+        ],
+        "name": "Auditor Prompt"
+      },
+      "ui": {
+        "position": {
+          "x": 280,
+          "y": 430
+        },
+        "measured": {
+          "width": 150,
+          "height": 68
+        },
+        "nodeType": "default",
+        "formDataValid": true
+      },
+      "input": [
+        {
+          "lane": "questions",
+          "from": "chat_input"
+        },
+        {
+          "lane": "text",
+          "from": "agent_classifier"
+        }
+      ]
+    },
+    {
+      "id": "agent_auditor",
+      "provider": "agent_deepagent",
+      "name": "Agent B: Auditor",
+      "config": {
+        "default": {
+          "advanced_mode": true,
+          "agent_description": "Independent GST audit cross-examiner. Independently reads the original deterministic mismatch data AND Agent A's classification, then issues a verified audit verdict. Does not summarize Agent A — acts as an adversarial auditor.",
+          "system_prompt": "You are Agent B: Independent GST Audit Cross-Examiner for CrediFlow.\n\nYou receive both the original deterministic mismatch record AND Agent A's classification. Your process:\n1. First independently analyse the raw mismatch data yourself against Indian GST law\n2. Then cross-examine Agent A's reasoning — agree, disagree, or partially agree with specific evidence\n3. Issue your audit verdict\n\nYou are an adversarial auditor. If Agent A is wrong, say so and explain why with evidence from the raw record. If Agent A is right, confirm it with your own independent reasoning — do NOT just repeat Agent A's words.\n\nOutput valid JSON only (no markdown fences):\n{\"audit_verdict\": \"AGREE|DISAGREE|PARTIALLY_AGREE\", \"auditor_root_cause_code\": \"<same code set>\", \"auditor_confidence\": <0.0-1.0>, \"independent_analysis\": \"<your own reading>\", \"cross_examination\": \"<critique or confirmation>\", \"final_recommendation\": \"<next steps for Finance Manager>\"}"
+        },
+        "name": "Agent B: Auditor"
+      },
+      "ui": {
+        "position": {
+          "x": 500,
+          "y": 430
+        },
+        "measured": {
+          "width": 150,
+          "height": 88
+        },
+        "nodeType": "default",
+        "formDataValid": true
+      },
+      "input": [
+        {
+          "lane": "questions",
+          "from": "prompt_auditor"
+        }
+      ]
+    },
+    {
+      "id": "llm_auditor",
+      "provider": "llm_openai",
+      "name": "OpenAI (Auditor)",
+      "config": {
+        "profile": "openai-5-2",
+        "openai-5-2": {
+          "apikey": ""
+        },
+        "name": "OpenAI (Auditor)"
+      },
+      "ui": {
+        "position": {
+          "x": 720,
+          "y": 430
+        },
+        "measured": {
+          "width": 150,
+          "height": 68
+        },
+        "nodeType": "default",
+        "formDataValid": true
+      },
+      "control": [
+        {
+          "classType": "llm",
+          "from": "agent_auditor"
+        }
+      ]
+    }
+  ],
+  "version": 1,
+  "docRevision": 2,
+  "isLocked": false,
+  "snapToGrid": true,
+  "snapGridSize": [
+    10,
+    10
+  ],
+  "project_id": "d7e4af43-611d-4ad3-94ef-63b943bf6e1c"
+}

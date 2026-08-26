@@ -25,6 +25,7 @@ from ..services.rocketride_service import RocketRideService
 from ..services.human_gate import HumanGate, HumanDecision
 from ..services.notice_generator import generate_pdf_notice, generate_bilingual_nudges
 from ..services.nudge_dispatcher import NudgeDispatcher
+from ..services.audit_service import AuditService
 
 router = APIRouter(prefix="/api")
 
@@ -33,6 +34,11 @@ engine = GSTReconciliationEngine(high_value_threshold=50000.0)
 rocketride_svc = RocketRideService()
 gate = HumanGate(confidence_threshold=0.85, high_value_threshold_inr=50000.0)
 dispatcher = NudgeDispatcher()
+audit_svc = AuditService(
+    reconciliation_engine=engine,
+    rocketride_service=rocketride_svc,
+    human_gate=gate
+)
 
 # In-memory store for audit results and reconciliation state
 STATE: Dict[str, Any] = {
@@ -240,75 +246,39 @@ def run_custom_reconciliation(req: CustomReconcileRequest):
 async def run_multi_agent_audit(req: Optional[AuditRequest] = None):
     """
     Runs the RocketRide dual-agent audit (Agent A Classifier + Agent B Cross-Examiner)
-    and routes through the Human Gate.
+    through AuditService, routing through the Human Gate.
     """
-    if not STATE["discrepancies"]:
-        # Auto-reconcile first if not run yet
-        run_reconciliation()
+    if not STATE["purchase_register"] or not STATE["gstr_2b_records"]:
+        pr, g2b = generate_demo_dataset()
+        STATE["purchase_register"] = pr
+        STATE["gstr_2b_records"] = g2b
+    else:
+        pr = STATE["purchase_register"]
+        g2b = STATE["gstr_2b_records"]
 
-    discs = STATE["discrepancies"]
-    if req and req.invoice_numbers:
-        discs = [d for d in discs if d.invoice_number in req.invoice_numbers]
+    filter_invs = req.invoice_numbers if req else None
+    audit_output = await audit_svc.execute_audit(pr, g2b, filter_invoices=filter_invs)
 
-    results = []
-    for d in discs:
-        m_dict = {
-            "invoice_number": d.invoice_number,
-            "supplier_gstin": d.supplier_gstin,
-            "supplier_name": d.supplier_name,
-            "mismatch_type": d.mismatch_type.value,
-            "itc_exposure_rupees": d.itc_exposure_rupees,
-            "purchase_register_tax": d.purchase_register_tax,
-            "gstr_2b_tax": d.gstr_2b_tax,
-            "taxable_value_diff": d.taxable_value_diff,
-            "details": d.details,
-            "rule_citation": d.rule_citation,
-            "severity": d.severity.value,
-            "filing_period": "2026-04",
-            "hsn_code": "847130",
-        }
-
-        res = await rocketride_svc.audit_mismatch(m_dict)
-        STATE["audit_results"][d.invoice_number] = res
-
-        # Evaluate Human Gate
-        gate_entry = gate.evaluate(m_dict, res.to_dict())
-
-        # Generate bilingual nudge previews
-        nudges = generate_bilingual_nudges(
-            supplier_name=d.supplier_name,
-            invoice_number=d.invoice_number,
-            invoice_date="2026-04-12",
-            taxable_value=d.taxable_value_diff + 100000.0,
-            itc_exposure=d.itc_exposure_rupees,
-            mismatch_type=d.mismatch_type.value,
-            root_cause_code=res.agent_a.root_cause_code
-        )
-
-        results.append({
-            "invoice_number": d.invoice_number,
-            "supplier_name": d.supplier_name,
-            "supplier_gstin": d.supplier_gstin,
-            "itc_exposure_rupees": d.itc_exposure_rupees,
-            "mismatch_type": d.mismatch_type.value,
-            "agent_a": res.agent_a.raw,
-            "agent_b": res.agent_b.raw,
-            "requires_human_review": res.requires_human_review,
-            "human_review_triggers": {
-                "agent_disagreement": res.trigger_agent_disagreement,
-                "low_confidence": res.trigger_low_confidence,
-                "high_exposure": res.trigger_high_exposure,
-                "malformed_input": res.trigger_malformed
-            },
-            "human_review_reasons": res.human_review_reasons,
-            "gate_id": gate_entry.gate_id if gate_entry else None,
-            "nudge_preview": nudges
-        })
+    STATE["discrepancies"] = [
+        d for d in engine.reconcile(pr, g2b)
+        if not filter_invs or d.invoice_number in filter_invs
+    ]
 
     return {
-        "audited_count": len(results),
-        "human_gate_pending": gate.pending_count,
-        "results": results
+        "processed": audit_output["processed"],
+        "matched": audit_output["matched"],
+        "mismatched": audit_output["mismatched"],
+        "itc_exposure": audit_output["itc_exposure"],
+        "risk_level": audit_output["risk_level"],
+        "human_review_required": audit_output["human_review_required"],
+        "execution_engine": audit_output["execution_engine"],
+        "audited_count": len(audit_output["findings"]),
+        "human_gate_pending": audit_output["human_gate_pending"],
+        "wall_clock_ms": audit_output["wall_clock_ms"],
+        "summary": audit_output["summary"],
+        "results": audit_output["results"],
+        "findings": audit_output["findings"],
+        "evidence": audit_output["evidence"]
     }
 
 

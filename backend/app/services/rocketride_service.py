@@ -1,13 +1,14 @@
 """
 RocketRide Service — CrediFlow
-Manages the full SDK lifecycle: connect → use() → chat() → terminate() → disconnect()
-Guaranteed terminate() in all code paths (finally blocks).
+Manages the full RocketRide Cloud & Local SDK lifecycle:
+connect → use() → chat() → terminate() → disconnect()
 
 Key design features:
-  1. The pipeline uses a `chat` source node. AI answers are retrieved via client.chat() with SSE streaming.
-  2. Agent A (Root-Cause Classifier) and Agent B (Audit Cross-Examiner) run in independent sessions.
-  3. Agent B receives both the raw deterministic mismatch record AND Agent A's output to perform adversarial cross-examination.
-  4. Multi-tier resilience: live RocketRide LLM pipeline execution with automatic compliance fallback for rate-limit / upstream API disruptions.
+  1. Communicates with RocketRide Cloud or local engine via WebSockets (URI + Auth).
+  2. Uses official RocketRide SDK when available, with automatic statutory compliance fallback.
+  3. Agent A (Root-Cause Classifier) and Agent B (Audit Cross-Examiner) run in independent sessions.
+  4. Agent B receives both the raw deterministic mismatch record AND Agent A's output for adversarial cross-examination.
+  5. Never fakes execution — explicitly marks results with `execution_engine` (ROCKETRIDE_CLOUD vs STATUTORY_FALLBACK).
 """
 
 from __future__ import annotations
@@ -19,6 +20,7 @@ import time
 from typing import Any, Dict, List, Optional, Tuple
 
 from dotenv import load_dotenv
+
 try:
     from rocketride import RocketRideClient, RocketRideClientConfig, Question
     ROCKETRIDE_SDK_AVAILABLE = True
@@ -31,15 +33,19 @@ except ImportError:
 load_dotenv()
 
 # ─── Configuration ────────────────────────────────────────────────────────────
+# Supports official ROCKETRIDE_URI and ROCKETRIDE_AUTH (with ROCKETRIDE_APIKEY fallback)
 ROCKETRIDE_URI = os.getenv("ROCKETRIDE_URI", "ws://localhost:52257")
-ROCKETRIDE_APIKEY = os.getenv("ROCKETRIDE_APIKEY", "MYAPIKEY")
+ROCKETRIDE_AUTH = os.getenv("ROCKETRIDE_AUTH") or os.getenv("ROCKETRIDE_APIKEY", "MYAPIKEY")
 
 def _find_pipeline_path() -> str:
-    """Search for the pipeline file from cwd upward."""
+    """Search for the pipeline file from cwd upward, checking both standard naming conventions."""
     candidates = [
+        os.path.join(os.getcwd(), "pipelines", "crediflow_audit.pipe"),
         os.path.join(os.getcwd(), "pipelines", "crediflow_audit_pipeline.pipe"),
-        os.path.abspath(os.path.join(os.path.dirname(__file__), "../../../../pipelines/crediflow_audit_pipeline.pipe")),
+        os.path.abspath(os.path.join(os.path.dirname(__file__), "../../../pipelines/crediflow_audit.pipe")),
         os.path.abspath(os.path.join(os.path.dirname(__file__), "../../../pipelines/crediflow_audit_pipeline.pipe")),
+        os.path.abspath(os.path.join(os.path.dirname(__file__), "../../../../pipelines/crediflow_audit.pipe")),
+        os.path.abspath(os.path.join(os.path.dirname(__file__), "../../../../pipelines/crediflow_audit_pipeline.pipe")),
     ]
     for p in candidates:
         if os.path.exists(p):
@@ -53,22 +59,23 @@ PIPELINE_PATH = _find_pipeline_path()
 
 class AgentAResult:
     """Output from Agent A (Classifier)."""
-    def __init__(self, raw: Dict[str, Any], latency_ms: float, tokens: int):
+    def __init__(self, raw: Dict[str, Any], latency_ms: float, tokens: int, source: str = "ROCKETRIDE_CLOUD"):
         self.root_cause_code: str = raw.get("root_cause_code", "UNKNOWN")
         self.confidence: float = float(raw.get("confidence", 0.0))
         self.reasoning: str = raw.get("reasoning", "")
         self.recommended_action: str = raw.get("recommended_action", "")
         self.latency_ms = latency_ms
         self.tokens = tokens
+        self.source = source
         self.raw = raw
 
     def __repr__(self):
-        return f"AgentAResult(code={self.root_cause_code}, confidence={self.confidence:.2f})"
+        return f"AgentAResult(code={self.root_cause_code}, confidence={self.confidence:.2f}, source={self.source})"
 
 
 class AgentBResult:
     """Output from Agent B (Auditor) — independent cross-examination."""
-    def __init__(self, raw: Dict[str, Any], latency_ms: float, tokens: int):
+    def __init__(self, raw: Dict[str, Any], latency_ms: float, tokens: int, source: str = "ROCKETRIDE_CLOUD"):
         self.audit_verdict: str = raw.get("audit_verdict", "UNKNOWN")  # AGREE | DISAGREE | PARTIALLY_AGREE
         self.auditor_root_cause_code: str = raw.get("auditor_root_cause_code", "UNKNOWN")
         self.auditor_confidence: float = float(raw.get("auditor_confidence", 0.0))
@@ -77,10 +84,11 @@ class AgentBResult:
         self.final_recommendation: str = raw.get("final_recommendation", "")
         self.latency_ms = latency_ms
         self.tokens = tokens
+        self.source = source
         self.raw = raw
 
     def __repr__(self):
-        return f"AgentBResult(verdict={self.audit_verdict}, confidence={self.auditor_confidence:.2f})"
+        return f"AgentBResult(verdict={self.audit_verdict}, confidence={self.auditor_confidence:.2f}, source={self.source})"
 
 
 class PipelineAuditResult:
@@ -94,6 +102,7 @@ class PipelineAuditResult:
         is_malformed: bool,
         total_latency_ms: float,
         total_tokens: int,
+        execution_engine: str = "ROCKETRIDE_CLOUD",
         confidence_threshold: float = 0.85,
         high_value_threshold_inr: float = 50_000.0,
     ):
@@ -104,6 +113,7 @@ class PipelineAuditResult:
         self.is_malformed = is_malformed
         self.total_latency_ms = total_latency_ms
         self.total_tokens = total_tokens
+        self.execution_engine = execution_engine
 
         # ── Human Gate: evaluate ALL 4 triggers ──────────────────────────────
         self.trigger_agent_disagreement: bool = (
@@ -149,6 +159,7 @@ class PipelineAuditResult:
             "is_malformed": self.is_malformed,
             "total_latency_ms": round(self.total_latency_ms, 1),
             "total_tokens": self.total_tokens,
+            "execution_engine": self.execution_engine,
             "requires_human_review": self.requires_human_review,
             "human_review_triggers": {
                 "agent_disagreement": self.trigger_agent_disagreement,
@@ -164,21 +175,22 @@ class PipelineAuditResult:
 
 class RocketRideService:
     """
-    CrediFlow RocketRide service.
+    CrediFlow RocketRide Cloud & Local service.
     Runs the dual-agent (Classifier + Auditor) pipeline for each mismatch record.
     """
 
     def __init__(
         self,
-        uri: str = ROCKETRIDE_URI,
-        apikey: str = ROCKETRIDE_APIKEY,
-        pipeline_path: str = PIPELINE_PATH,
-        confidence_threshold: float = None,
-        high_value_threshold_inr: float = None,
+        uri: Optional[str] = None,
+        auth: Optional[str] = None,
+        pipeline_path: Optional[str] = None,
+        confidence_threshold: Optional[float] = None,
+        high_value_threshold_inr: Optional[float] = None,
     ):
-        self.uri = uri
-        self.apikey = apikey
-        self.pipeline_path = pipeline_path
+        self.uri = uri or ROCKETRIDE_URI
+        self.auth = auth or ROCKETRIDE_AUTH
+        self.pipeline_path = pipeline_path or PIPELINE_PATH
+
         raw_conf = os.getenv("CONFIDENCE_THRESHOLD")
         self.confidence_threshold = confidence_threshold or (float(raw_conf) if raw_conf and raw_conf.strip() else 0.85)
 
@@ -186,20 +198,35 @@ class RocketRideService:
         self.high_value_threshold_inr = high_value_threshold_inr or (float(raw_high) if raw_high and raw_high.strip() else 50000.0)
         self._openai_key: str = os.getenv("OPENAI_API_KEY", "")
 
-    def _load_pipeline_with_key(self) -> Dict[str, Any]:
-        """Load .pipe JSON and inject OPENAI_API_KEY into LLM nodes."""
-        with open(self.pipeline_path, "r") as f:
-            pipe = json.load(f)
+    def is_cloud_configured(self) -> bool:
+        """Returns True if a live RocketRide Cloud or local server URI is configured and SDK is installed."""
+        return bool(
+            ROCKETRIDE_SDK_AVAILABLE
+            and self.uri
+            and not self.uri.startswith("ws://localhost")
+            and self.auth
+            and self.auth not in ("MYAPIKEY", "your_auth_token_here", "")
+        )
 
-        if self._openai_key and self._openai_key != "your_openai_api_key_here":
-            for component in pipe.get("components", []):
-                if component.get("provider") in ("llm_openai",):
-                    profile = component.get("config", {}).get("profile", "openai-5-2")
-                    if profile in component.get("config", {}):
-                        component["config"][profile]["apikey"] = self._openai_key
-                    else:
-                        component["config"][profile] = {"apikey": self._openai_key}
-        return pipe
+    def _load_pipeline_with_key(self) -> Optional[Dict[str, Any]]:
+        """Load .pipe JSON and inject OPENAI_API_KEY into LLM nodes if present."""
+        if not os.path.exists(self.pipeline_path):
+            return None
+        try:
+            with open(self.pipeline_path, "r") as f:
+                pipe = json.load(f)
+
+            if self._openai_key and self._openai_key != "your_openai_api_key_here":
+                for component in pipe.get("components", []):
+                    if component.get("provider") in ("llm_openai",):
+                        profile = component.get("config", {}).get("profile", "openai-5-2")
+                        if profile in component.get("config", {}):
+                            component["config"][profile]["apikey"] = self._openai_key
+                        else:
+                            component["config"][profile] = {"apikey": self._openai_key}
+            return pipe
+        except Exception:
+            return None
 
     def _build_classifier_prompt(self, mismatch: Dict[str, Any]) -> str:
         return (
@@ -304,7 +331,6 @@ class RocketRideService:
         inv = mismatch.get("invoice_number", "")
         supplier = mismatch.get("supplier_name", "Supplier")
 
-        # Independent statutory analysis
         if mtype == "MISSING_IN_2B":
             analysis = (
                 f"Independent check under Section 16(2)(aa) CGST Act confirms no matching credit exists in GSTR-2B for invoice {inv}. "
@@ -360,11 +386,13 @@ class RocketRideService:
         prompt_text: str,
     ) -> Tuple[str, float, int]:
         """
-        Run a SINGLE agent session: connect → use() → chat() → terminate() → disconnect().
-        Returns empty string (triggering fallback) if RocketRide SDK is not available.
+        Run a SINGLE agent session against RocketRide Cloud or local engine:
+        connect → use() → chat() → terminate() → disconnect().
+        Returns empty string if RocketRide SDK is unavailable or connection fails.
         """
-        if not ROCKETRIDE_SDK_AVAILABLE:
+        if not ROCKETRIDE_SDK_AVAILABLE or not RocketRideClient:
             return "", 0.0, 0
+
         sse_messages: List[str] = []
 
         async def _capture_sse(evt_type: str, data: Any):
@@ -374,24 +402,21 @@ class RocketRideService:
                 sse_messages.append(data)
 
         async with RocketRideClient(
-            config=RocketRideClientConfig(uri=self.uri, auth=self.apikey)
+            config=RocketRideClientConfig(uri=self.uri, auth=self.auth)
         ) as client:
             token: Optional[str] = None
             try:
-                use_result = await client.use(pipeline=pipe_config)
-                token = use_result["token"]
+                use_result = await asyncio.wait_for(client.use(pipeline=pipe_config), timeout=8.0)
+                token = use_result.get("token")
 
                 q = Question(expectJson=True)
                 q.addQuestion(prompt_text)
 
                 t0 = time.monotonic()
-                try:
-                    result = await asyncio.wait_for(
-                        client.chat(token=token, question=q, on_sse=_capture_sse),
-                        timeout=10.0
-                    )
-                except asyncio.TimeoutError:
-                    result = None
+                result = await asyncio.wait_for(
+                    client.chat(token=token, question=q, on_sse=_capture_sse),
+                    timeout=10.0
+                )
                 latency_ms = (time.monotonic() - t0) * 1000
 
                 answer_text = ""
@@ -425,6 +450,7 @@ class RocketRideService:
 
         total_start = time.monotonic()
         total_tokens = 0
+        execution_engine = "ROCKETRIDE_CLOUD"
 
         pipe_config = self._load_pipeline_with_key()
 
@@ -433,22 +459,26 @@ class RocketRideService:
         agent_a_text = ""
         agent_a_latency = 0.0
         agent_a_tokens = 0
+        agent_a_source = "ROCKETRIDE_CLOUD"
 
-        try:
-            agent_a_text, agent_a_latency, agent_a_tokens = await self._run_agent_session(
-                pipe_config, classifier_prompt
-            )
-        except Exception:
-            pass
+        if pipe_config and ROCKETRIDE_SDK_AVAILABLE:
+            try:
+                agent_a_text, agent_a_latency, agent_a_tokens = await self._run_agent_session(
+                    pipe_config, classifier_prompt
+                )
+            except Exception:
+                agent_a_text = ""
 
         agent_a_raw = self._parse_json_from_answer(agent_a_text)
         if not agent_a_raw.get("root_cause_code") or agent_a_raw.get("root_cause_code") == "UNKNOWN" or agent_a_raw.get("parse_error"):
-            # Fallback to statutory classification engine
+            # Graceful fallback to statutory classification engine
             agent_a_raw = self._fallback_classifier(mismatch)
+            agent_a_source = "STATUTORY_FALLBACK"
+            execution_engine = "STATUTORY_FALLBACK"
             if agent_a_latency == 0.0:
                 agent_a_latency = 120.0
 
-        agent_a = AgentAResult(agent_a_raw, agent_a_latency, agent_a_tokens)
+        agent_a = AgentAResult(agent_a_raw, agent_a_latency, agent_a_tokens, source=agent_a_source)
         total_tokens += agent_a_tokens
 
         # ── Session 2: Agent B (Auditor) — receives BOTH raw data + Agent A output ─
@@ -456,22 +486,26 @@ class RocketRideService:
         agent_b_text = ""
         agent_b_latency = 0.0
         agent_b_tokens = 0
+        agent_b_source = "ROCKETRIDE_CLOUD"
 
-        try:
-            agent_b_text, agent_b_latency, agent_b_tokens = await self._run_agent_session(
-                pipe_config, auditor_prompt
-            )
-        except Exception:
-            pass
+        if pipe_config and ROCKETRIDE_SDK_AVAILABLE and execution_engine == "ROCKETRIDE_CLOUD":
+            try:
+                agent_b_text, agent_b_latency, agent_b_tokens = await self._run_agent_session(
+                    pipe_config, auditor_prompt
+                )
+            except Exception:
+                agent_b_text = ""
 
         agent_b_raw = self._parse_json_from_answer(agent_b_text)
         if not agent_b_raw.get("audit_verdict") or agent_b_raw.get("audit_verdict") == "UNKNOWN" or agent_b_raw.get("parse_error"):
-            # Fallback to statutory independent audit cross-examiner
+            # Graceful fallback to statutory independent audit cross-examiner
             agent_b_raw = self._fallback_auditor(mismatch, agent_a)
+            agent_b_source = "STATUTORY_FALLBACK"
+            execution_engine = "STATUTORY_FALLBACK"
             if agent_b_latency == 0.0:
                 agent_b_latency = 110.0
 
-        agent_b = AgentBResult(agent_b_raw, agent_b_latency, agent_b_tokens)
+        agent_b = AgentBResult(agent_b_raw, agent_b_latency, agent_b_tokens, source=agent_b_source)
         total_tokens += agent_b_tokens
 
         total_latency = (time.monotonic() - total_start) * 1000
@@ -484,6 +518,7 @@ class RocketRideService:
             is_malformed=is_malformed,
             total_latency_ms=total_latency,
             total_tokens=total_tokens,
+            execution_engine=execution_engine,
             confidence_threshold=self.confidence_threshold,
             high_value_threshold_inr=self.high_value_threshold_inr,
         )

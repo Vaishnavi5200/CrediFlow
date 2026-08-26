@@ -44,6 +44,7 @@ export default function App() {
 
   // Run telemetry — populated after a real audit run (not benchmark data)
   const [runTelemetry, setRunTelemetry] = useState(null); // null = no run yet
+  const [auditEngine, setAuditEngine] = useState(null); // 'ROCKETRIDE_CLOUD' | 'STATUTORY_FALLBACK'
 
   // Workflow Upload State (Matching Reference Image 1)
   const [prFile, setPrFile] = useState({ name: '', size: '', loaded: false });
@@ -208,10 +209,15 @@ export default function App() {
         retries: 0,
         humanReview: (gateData.pending_count || humanReviewCount),
       });
+      setAuditEngine(data.execution_engine || 'STATUTORY_FALLBACK');
 
       await new Promise(r => setTimeout(r, 400));
       setWorkflowStep(3);
-      showNotification('RocketRide Pipeline Execution Complete! 12-Step Story Ready.', 'success');
+      if (data.execution_engine === 'ROCKETRIDE_CLOUD') {
+        showNotification('RocketRide Cloud AI Pipeline Complete! 12-Step Story Ready.', 'success');
+      } else {
+        showNotification('Statutory Rule 60 Compliance Audit Complete! 12-Step Story Ready.', 'info');
+      }
     } catch (err) {
       showNotification('Pipeline execution failed: ' + err.message, 'error');
       setWorkflowStep(1);
@@ -842,9 +848,25 @@ export default function App() {
 
             {/* ── STEP 2: ROCKETRIDE PIPELINE EXECUTION BOX (Exact Match to Reference Image 1) ── */}
             <div className="studio-card" style={{ padding: '24px 28px', marginBottom: 28 }}>
-              <div style={{ fontSize: 16, fontWeight: 700, fontFamily: 'JetBrains Mono, monospace', marginBottom: 16, display: 'flex', alignItems: 'center', gap: 8 }}>
-                <Zap size={18} color="#059669" />
-                RocketRide Pipeline
+              <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center', marginBottom: 16 }}>
+                <div style={{ fontSize: 16, fontWeight: 700, fontFamily: 'JetBrains Mono, monospace', display: 'flex', alignItems: 'center', gap: 8 }}>
+                  <Zap size={18} color="#059669" />
+                  RocketRide Pipeline
+                </div>
+                {auditEngine && (
+                  <span style={{
+                    fontSize: 11,
+                    fontWeight: 700,
+                    padding: '3px 10px',
+                    borderRadius: 6,
+                    fontFamily: 'JetBrains Mono, monospace',
+                    background: auditEngine === 'ROCKETRIDE_CLOUD' ? 'rgba(16, 185, 129, 0.15)' : 'rgba(99, 102, 241, 0.12)',
+                    color: auditEngine === 'ROCKETRIDE_CLOUD' ? '#059669' : 'var(--text-main)',
+                    border: `1px solid ${auditEngine === 'ROCKETRIDE_CLOUD' ? '#10b981' : 'var(--border-app)'}`
+                  }}>
+                    {auditEngine === 'ROCKETRIDE_CLOUD' ? '● ROCKETRIDE CLOUD LIVE' : '● STATUTORY RULE 60 ENGINE'}
+                  </span>
+                )}
               </div>
 
               <div style={{ display: 'flex', flexDirection: 'column', gap: 10, fontFamily: 'JetBrains Mono, monospace', fontSize: 13.5 }}>
