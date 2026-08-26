@@ -17,3 +17,4 @@ frontend/out/
 .rocketride/
 .DS_Store
 .system_generated/
+.vercel
