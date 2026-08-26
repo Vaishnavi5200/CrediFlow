@@ -19,7 +19,14 @@ import time
 from typing import Any, Dict, List, Optional, Tuple
 
 from dotenv import load_dotenv
-from rocketride import RocketRideClient, RocketRideClientConfig, Question
+try:
+    from rocketride import RocketRideClient, RocketRideClientConfig, Question
+    ROCKETRIDE_SDK_AVAILABLE = True
+except ImportError:
+    ROCKETRIDE_SDK_AVAILABLE = False
+    RocketRideClient = None
+    RocketRideClientConfig = None
+    Question = None
 
 load_dotenv()
 
@@ -355,7 +362,10 @@ class RocketRideService:
     ) -> Tuple[str, float, int]:
         """
         Run a SINGLE agent session: connect → use() → chat() → terminate() → disconnect().
+        Returns empty string (triggering fallback) if RocketRide SDK is not available.
         """
+        if not ROCKETRIDE_SDK_AVAILABLE:
+            return "", 0.0, 0
         sse_messages: List[str] = []
 
         async def _capture_sse(evt_type: str, data: Any):
