@@ -10,10 +10,24 @@ from __future__ import annotations
 import os
 from datetime import datetime, timezone
 from typing import Any, Dict, List, Optional
-from reportlab.lib.pagesizes import letter
-from reportlab.platypus import SimpleDocTemplate, Paragraph, Spacer, Table, TableStyle
-from reportlab.lib.styles import getSampleStyleSheet, ParagraphStyle
-from reportlab.lib import colors
+# reportlab is imported lazily inside functions to avoid crash on Vercel serverless cold-start
+try:
+    from reportlab.lib.pagesizes import letter
+    from reportlab.platypus import SimpleDocTemplate, Paragraph, Spacer, Table, TableStyle
+    from reportlab.lib.styles import getSampleStyleSheet, ParagraphStyle
+    from reportlab.lib import colors
+    REPORTLAB_AVAILABLE = True
+except ImportError:
+    REPORTLAB_AVAILABLE = False
+    letter = None
+    SimpleDocTemplate = None
+    Paragraph = None
+    Spacer = None
+    Table = None
+    TableStyle = None
+    getSampleStyleSheet = None
+    ParagraphStyle = None
+    colors = None
 
 
 def generate_bilingual_nudges(
@@ -135,6 +149,9 @@ def generate_pdf_notice(
     Generates a formal statutory GST ITC discrepancy notice in PDF format using ReportLab.
     Returns the absolute path to the generated PDF.
     """
+    if not REPORTLAB_AVAILABLE:
+        raise RuntimeError("ReportLab is not available in this environment. PDF generation requires reportlab to be installed.")
+
     target_dir = output_dir or _get_reports_dir()
     os.makedirs(target_dir, exist_ok=True)
     inv = mismatch_data.get("invoice_number", "UNKNOWN")
