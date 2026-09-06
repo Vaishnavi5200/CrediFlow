@@ -34,6 +34,10 @@ FRONTEND_DIST = os.path.abspath(os.path.join(os.path.dirname(__file__), "../../f
 if os.path.exists(FRONTEND_DIST):
     app.mount("/assets", StaticFiles(directory=os.path.join(FRONTEND_DIST, "assets")), name="assets")
 
+    @app.get("/")
+    async def serve_root():
+        return FileResponse(os.path.join(FRONTEND_DIST, "index.html"))
+
     @app.get("/{full_path:path}")
     async def serve_frontend(full_path: str):
         file_path = os.path.join(FRONTEND_DIST, full_path)

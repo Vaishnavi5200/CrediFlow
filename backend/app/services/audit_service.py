@@ -58,7 +58,7 @@ class AuditService:
         # Step 3 & 4: Multi-Agent Audit via RocketRide
         findings = []
         evidence = []
-        engine_counts = {"ROCKETRIDE_CLOUD": 0, "STATUTORY_FALLBACK": 0}
+        engine_counts = {"ROCKETRIDE_WEBHOOK": 0, "ROCKETRIDE_CLOUD": 0, "STATUTORY_FALLBACK": 0}
 
         for d in discrepancies:
             m_dict = {
@@ -134,7 +134,12 @@ class AuditService:
             })
 
         wall_clock_ms = (time.monotonic() - t0) * 1000
-        overall_engine = "ROCKETRIDE_CLOUD" if engine_counts["ROCKETRIDE_CLOUD"] > 0 else "STATUTORY_FALLBACK"
+        if engine_counts.get("ROCKETRIDE_WEBHOOK", 0) > 0:
+            overall_engine = "ROCKETRIDE_WEBHOOK"
+        elif engine_counts.get("ROCKETRIDE_CLOUD", 0) > 0:
+            overall_engine = "ROCKETRIDE_CLOUD"
+        else:
+            overall_engine = "STATUTORY_FALLBACK"
         human_review_required = self.gate.pending_count > 0 or any(f["requires_human_review"] for f in findings)
 
         # Risk Level Assessment

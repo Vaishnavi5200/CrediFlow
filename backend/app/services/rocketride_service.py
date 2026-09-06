@@ -221,7 +221,7 @@ class RocketRideService:
         """Returns True if ROCKETRIDE_WEBHOOK_URL and ROCKETRIDE_WEBHOOK_TOKEN are set to real values."""
         placeholders = {
             "MYAPIKEY", "your_private_token_here", "PASTE_YOUR_PRIVATE_TOKEN_HERE",
-            "your_auth_token_here", "", "pk_0b86e43d557b550ae5130108a4828001",  # public key ≠ private token
+            "your_auth_token_here", "",
         }
         return bool(
             self.webhook_url
