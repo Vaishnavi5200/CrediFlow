@@ -169,6 +169,10 @@ class CustomReconcileRequest(BaseModel):
 @router.post("/reconcile-custom")
 def run_custom_reconciliation(req: CustomReconcileRequest):
     """Reconciles custom uploaded Purchase Register and GSTR-2B datasets."""
+    # Guard: prevent absurdly large payloads
+    if len(req.purchase_register) > 2000 or len(req.gstr_2b) > 2000:
+        raise HTTPException(status_code=400, detail="Dataset too large: maximum 2000 records per dataset.")
+
     t0 = time.monotonic()
     pr_records = [
         InvoiceRecord(
@@ -176,11 +180,13 @@ def run_custom_reconciliation(req: CustomReconcileRequest):
             invoice_date=str(r.get("invoice_date", "2026-04-12")),
             supplier_gstin=str(r.get("supplier_gstin", "27AABCR1234F1ZS")),
             supplier_name=str(r.get("supplier_name", "Vendor")),
+            buyer_gstin=str(r.get("buyer_gstin", "27AAACB0987A1Z1")),
             taxable_value=float(r.get("taxable_value", 0.0)),
-            igst_amount=float(r.get("igst_amount", 0.0)),
-            cgst_amount=float(r.get("cgst_amount", 0.0)),
-            sgst_amount=float(r.get("sgst_amount", 0.0)),
-            hsn_code=str(r.get("hsn_code", "847130")),
+            igst=float(r.get("igst", r.get("igst_amount", 0.0))),
+            cgst=float(r.get("cgst", r.get("cgst_amount", 0.0))),
+            sgst=float(r.get("sgst", r.get("sgst_amount", 0.0))),
+            cess=float(r.get("cess", 0.0)),
+            hsn_code=str(r.get("hsn_code", "")),
             filing_period=str(r.get("filing_period", "2026-04"))
         )
         for r in req.purchase_register
@@ -192,11 +198,13 @@ def run_custom_reconciliation(req: CustomReconcileRequest):
             invoice_date=str(r.get("invoice_date", "2026-04-12")),
             supplier_gstin=str(r.get("supplier_gstin", "27AABCR1234F1ZS")),
             supplier_name=str(r.get("supplier_name", "Vendor")),
+            buyer_gstin=str(r.get("buyer_gstin", "27AAACB0987A1Z1")),
             taxable_value=float(r.get("taxable_value", 0.0)),
-            igst_amount=float(r.get("igst_amount", 0.0)),
-            cgst_amount=float(r.get("cgst_amount", 0.0)),
-            sgst_amount=float(r.get("sgst_amount", 0.0)),
-            hsn_code=str(r.get("hsn_code", "847130")),
+            igst=float(r.get("igst", r.get("igst_amount", 0.0))),
+            cgst=float(r.get("cgst", r.get("cgst_amount", 0.0))),
+            sgst=float(r.get("sgst", r.get("sgst_amount", 0.0))),
+            cess=float(r.get("cess", 0.0)),
+            hsn_code=str(r.get("hsn_code", "")),
             filing_period=str(r.get("filing_period", "2026-04"))
         )
         for r in req.gstr_2b
@@ -276,7 +284,7 @@ async def run_multi_agent_audit(req: Optional[AuditRequest] = None):
         "human_gate_pending": audit_output["human_gate_pending"],
         "wall_clock_ms": audit_output["wall_clock_ms"],
         "summary": audit_output["summary"],
-        "results": audit_output["results"],
+        "results": audit_output["findings"],   # alias: frontend uses `results`
         "findings": audit_output["findings"],
         "evidence": audit_output["evidence"]
     }
@@ -355,6 +363,8 @@ def dispatch_compliance_nudge(req: NudgeDispatchRequest):
         }
 
     event = dispatcher.dispatch_nudge(m_dict, channels=req.channels)
+    body_text = event["whatsapp_payload"].get("body", "")
+    preview = body_text[:200] + ("..." if len(body_text) > 200 else "")
     return {
         "success": True,
         "dispatch_id": event["dispatch_id"],
@@ -362,7 +372,8 @@ def dispatch_compliance_nudge(req: NudgeDispatchRequest):
         "channels": event["channels"],
         "pdf_generated": bool(event["pdf_path"]),
         "status": "DISPATCHED",
-        "whatsapp_preview": event["whatsapp_payload"]["body"][:200] + "..."
+        "email_status": event.get("email_status", "SIMULATED_DISPATCH"),
+        "whatsapp_preview": preview
     }
 
 
@@ -444,14 +455,16 @@ def run_batch_benchmarks(count: int = Query(1000, ge=50, le=2000)):
 
     # Dynamic classification & resilience metrics
     malformed_count = sum(1 for d in batch_discs if d.mismatch_type.value == "MALFORMED_INPUT")
-    # In batch, simulate edge retries on ~6% of discrepancies
-    retried_count = max(1, int(len(batch_discs) * 0.06))
-    # Human gate cases: High exposure (>=50k) or malformed or low confidence
+    # Human gate cases: High exposure (>=50k) or malformed
     human_review_count = sum(1 for d in batch_discs if d.itc_exposure_rupees >= 50000.0 or d.mismatch_type.value == "MALFORMED_INPUT")
 
-    # Tokens & Cost: ~650 tokens per discrepancy audited (Agent A: 320, Agent B: 330)
-    total_tokens = len(batch_discs) * 650
-    # Cost formula: GPT-4o-mini rates ($0.15 / 1M input tokens, $0.60 / 1M output tokens ~ avg $0.0003 / 1k tokens)
+    # NOTE: Token & cost figures below are ESTIMATES based on GPT-4o-mini pricing
+    # (~650 tokens per dual-agent audit: Agent A ~320, Agent B ~330).
+    # Real token usage depends on RocketRide Cloud live session; these figures
+    # are provided as cost planning estimates, NOT measured values.
+    estimated_tokens_per_disc = 650
+    total_tokens = len(batch_discs) * estimated_tokens_per_disc
+    # GPT-4o-mini: ~$0.15/1M input + $0.60/1M output ≈ $0.0003/1k tokens blended
     cost_usd = round((total_tokens / 1000) * 0.0003, 4)
     cost_inr = round(cost_usd * 86.5, 2)
     cost_per_record_usd = round(cost_usd / max(count, 1), 6)
@@ -469,60 +482,147 @@ def run_batch_benchmarks(count: int = Query(1000, ge=50, le=2000)):
         "discrepancies_detected": len(batch_discs),
         "total_itc_exposure_rupees": round(total_exposure, 2),
         "failed_records": malformed_count,
-        "retried_records": retried_count,
         "human_review_cases": human_review_count,
-        "actual_tokens_used": total_tokens,
-        "actual_cost_usd": cost_usd,
-        "actual_cost_inr": cost_inr,
-        "cost_per_record_usd": cost_per_record_usd,
+        "estimated_tokens_per_audit": estimated_tokens_per_disc,
+        "estimated_total_tokens": total_tokens,
+        "estimated_cost_usd": cost_usd,
+        "estimated_cost_inr": cost_inr,
+        "estimated_cost_per_record_usd": cost_per_record_usd,
+        "cost_basis": "ESTIMATE: GPT-4o-mini pricing ~$0.0003/1k tokens. Actual cost depends on RocketRide Cloud live execution.",
         "mismatch_distribution": by_type,
-        "resilience_summary": f"{count} processed · {malformed_count} malformed · {retried_count} retried · {human_review_count} human review",
+        "resilience_summary": f"{count} processed · {malformed_count} malformed · {human_review_count} human review",
         "zero_llm_math_verified": True
+    }
+
+
+def _compute_vendor_compliance_score(
+    unresolved_itc: float,
+    total_invoiced_value: float,
+    mismatched_invoices: int,
+    total_invoices: int,
+    avg_days_unresolved: float
+) -> dict:
+    """
+    Explainable 0-100 Vendor Compliance Score (VCS).
+
+    Formula:
+        VCS = 100 - (0.45 * S_exposure + 0.35 * S_frequency + 0.20 * S_aging)
+
+    Where:
+        S_exposure  = min(100, (unresolved_itc / total_invoiced_value) * 100)  if total > 0 else 0
+        S_frequency = min(100, (mismatched_invoices / total_invoices) * 100)   if total > 0 else 0
+        S_aging     = min(100, (avg_days_unresolved / 30) * 100)
+    """
+    s_exposure = min(100.0, (unresolved_itc / max(total_invoiced_value, 1.0)) * 100.0)
+    s_frequency = min(100.0, (mismatched_invoices / max(total_invoices, 1)) * 100.0)
+    s_aging = min(100.0, (avg_days_unresolved / 30.0) * 100.0)
+
+    raw_score = 100.0 - (0.45 * s_exposure + 0.35 * s_frequency + 0.20 * s_aging)
+    score = max(0.0, min(100.0, round(raw_score, 1)))
+
+    if score >= 90:
+        tier, tier_label = "LOW", "TIER_1_COMPLIANT"
+    elif score >= 75:
+        tier, tier_label = "MEDIUM", "TIER_2_SATISFACTORY"
+    elif score >= 50:
+        tier, tier_label = "HIGH", "TIER_3_AT_RISK"
+    else:
+        tier, tier_label = "CRITICAL", "TIER_4_PAYMENT_HOLD"
+
+    return {
+        "score": score,
+        "tier": tier,
+        "tier_label": tier_label,
+        "components": {
+            "s_exposure": round(s_exposure, 2),
+            "s_frequency": round(s_frequency, 2),
+            "s_aging": round(s_aging, 2),
+            "weights": {"exposure": 0.45, "frequency": 0.35, "aging": 0.20}
+        }
     }
 
 
 @router.get("/vendor-scorecards")
 def get_vendor_scorecards():
-    """Generates vendor compliance health scorecards based on historical mismatch frequency."""
+    """
+    Generates vendor compliance health scorecards.
+    Compliance Score uses the explainable VCS formula:
+      VCS = 100 - (0.45*S_exposure + 0.35*S_frequency + 0.20*S_aging)
+    Demo data reflects the actual 45-invoice dataset mismatch state.
+    """
+    # Reconcile current dataset to get actual mismatch state
+    pr, g2b = generate_demo_dataset()
+    discrepancies = engine.reconcile(pr, g2b)
+
+    # Build per-vendor mismatch lookup from current reconciliation run
+    vendor_mismatches: Dict[str, dict] = {}
+    for d in discrepancies:
+        gstin = d.supplier_gstin
+        if gstin not in vendor_mismatches:
+            vendor_mismatches[gstin] = {"count": 0, "itc": 0.0, "days": 0.0}
+        vendor_mismatches[gstin]["count"] += 1
+        vendor_mismatches[gstin]["itc"] += d.itc_exposure_rupees
+        # Assign representative days open per mismatch type for demo dataset
+        days_map = {"MISSING_IN_2B": 22, "VALUE_MISMATCH": 14, "HSN_MISMATCH": 8, "GSTIN_MISMATCH": 12}
+        vendor_mismatches[gstin]["days"] = max(
+            vendor_mismatches[gstin]["days"],
+            float(days_map.get(d.mismatch_type.value, 0))
+        )
+
+    # Count invoices per vendor in purchase register
+    vendor_invoice_counts: Dict[str, int] = {}
+    vendor_total_value: Dict[str, float] = {}
+    for r in pr:
+        g = r.supplier_gstin
+        vendor_invoice_counts[g] = vendor_invoice_counts.get(g, 0) + 1
+        vendor_total_value[g] = vendor_total_value.get(g, 0.0) + r.compute_total()
+
     scorecards = []
-    for idx, v in enumerate(SAMPLE_VENDORS):
-        if "Rajesh" in v["name"]:
-            score = 64
-            risk = "HIGH"
-            status = "Nudge Pending (INV-0881)"
-            delay_days = 22
-        elif "Apex" in v["name"] or "Dynamic" in v["name"]:
-            score = 78
-            risk = "MEDIUM"
-            status = "Value Discrepancy"
-            delay_days = 14
-        elif "Zenith" in v["name"] or "Vardhman" in v["name"]:
-            score = 82
-            risk = "MEDIUM"
-            status = "HSN/GSTIN Discrepancy"
-            delay_days = 8
+    for v in SAMPLE_VENDORS:
+        gstin = v["gstin"]
+        mdata = vendor_mismatches.get(gstin, {})
+        mismatched = mdata.get("count", 0)
+        itc_blocked = mdata.get("itc", 0.0)
+        avg_days = mdata.get("days", 0.0)
+        total_inv = vendor_invoice_counts.get(gstin, 5)  # default for vendors with no mismatch in demo
+        total_val = vendor_total_value.get(gstin, 500000.0)
+
+        vcs = _compute_vendor_compliance_score(
+            unresolved_itc=itc_blocked,
+            total_invoiced_value=total_val,
+            mismatched_invoices=mismatched,
+            total_invoices=total_inv,
+            avg_days_unresolved=avg_days
+        )
+
+        if mismatched > 0:
+            status = f"{mismatched} discrepancy(ies) — ITC at risk: Rs. {itc_blocked:,.0f}"
         else:
-            score = 96 + (idx % 4)
-            risk = "LOW"
             status = "Fully Compliant"
-            delay_days = 0
 
         scorecards.append({
             "vendor_name": v["name"],
-            "gstin": v["gstin"],
+            "gstin": gstin,
             "state": v["state"],
-            "compliance_score": score,
-            "risk_tier": risk,
-            "avg_delay_days": delay_days,
+            "compliance_score": vcs["score"],
+            "risk_tier": vcs["tier"],
+            "tier_label": vcs["tier_label"],
+            "score_components": vcs["components"],
+            "avg_delay_days": avg_days,
+            "itc_blocked_inr": itc_blocked,
+            "mismatched_invoices": mismatched,
             "status": status,
             "phone": v["phone"],
             "email": v["email"]
         })
 
+    scorecards.sort(key=lambda x: x["compliance_score"])
+
     return {
         "total_vendors": len(scorecards),
-        "high_risk_count": sum(1 for s in scorecards if s["risk_tier"] == "HIGH"),
+        "high_risk_count": sum(1 for s in scorecards if s["risk_tier"] in ("HIGH", "CRITICAL")),
         "medium_risk_count": sum(1 for s in scorecards if s["risk_tier"] == "MEDIUM"),
         "low_risk_count": sum(1 for s in scorecards if s["risk_tier"] == "LOW"),
+        "score_formula": "VCS = 100 - (0.45*S_exposure + 0.35*S_frequency + 0.20*S_aging)",
         "scorecards": scorecards
     }

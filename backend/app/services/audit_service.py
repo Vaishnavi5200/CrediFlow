@@ -73,9 +73,17 @@ class AuditService:
                 "details": d.details,
                 "rule_citation": d.rule_citation,
                 "severity": d.severity.value,
-                "filing_period": "2026-04",
-                "hsn_code": "847130",
+                "filing_period": d.id.split("-")[1] + "-" + d.id.split("-")[2] if "-" in d.id else "2026-04",
+                "hsn_code": "",  # Not stored in DiscrepancyResult; set by invoice record
             }
+
+            # Recover actual taxable_value from purchase register for this invoice
+            pr_invoice = next((r for r in purchase_register if r.invoice_number == d.invoice_number), None)
+            actual_taxable_value = pr_invoice.taxable_value if pr_invoice else d.taxable_value_diff
+            actual_invoice_date = pr_invoice.invoice_date if pr_invoice else "2026-04-12"
+            if pr_invoice:
+                m_dict["filing_period"] = pr_invoice.filing_period
+                m_dict["hsn_code"] = pr_invoice.hsn_code
 
             audit_res: PipelineAuditResult = await self.rocketride.audit_mismatch(m_dict)
             engine_counts[audit_res.execution_engine] = engine_counts.get(audit_res.execution_engine, 0) + 1
@@ -83,12 +91,12 @@ class AuditService:
             # Evaluate Human Gate
             gate_entry = self.gate.evaluate(m_dict, audit_res.to_dict())
 
-            # Generate bilingual nudge previews
+            # Generate bilingual nudge previews using accurate invoice data
             nudges = generate_bilingual_nudges(
                 supplier_name=d.supplier_name,
                 invoice_number=d.invoice_number,
-                invoice_date="2026-04-12",
-                taxable_value=d.taxable_value_diff + 100000.0,
+                invoice_date=actual_invoice_date,
+                taxable_value=actual_taxable_value,
                 itc_exposure=d.itc_exposure_rupees,
                 mismatch_type=d.mismatch_type.value,
                 root_cause_code=audit_res.agent_a.root_cause_code
@@ -156,6 +164,5 @@ class AuditService:
                 "total_itc_exposure_rupees": total_exposure,
             },
             "findings": findings,
-            "results": findings,
             "evidence": evidence
         }

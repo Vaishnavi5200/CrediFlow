@@ -39,7 +39,12 @@ class NudgeDispatcher:
         inv = mismatch_record.get("invoice_number", "UNKNOWN")
         supplier = mismatch_record.get("supplier_name", "Vendor")
         exposure = float(mismatch_record.get("itc_exposure_rupees", 0.0))
-        taxable = float(mismatch_record.get("taxable_value_diff", 0.0)) + 100000.0
+        # Use actual taxable_value if provided; fall back to taxable_value_diff (not artificially inflated)
+        taxable = float(
+            mismatch_record.get("taxable_value")
+            or mismatch_record.get("taxable_value_diff")
+            or 0.0
+        )
         inv_date = mismatch_record.get("invoice_date", "2026-04-12")
 
         # 1. Generate bilingual nudge messages & steps

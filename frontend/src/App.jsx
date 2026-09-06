@@ -10,9 +10,12 @@ import {
 } from 'lucide-react';
 import confetti from 'canvas-confetti';
 
-const API_BASE = typeof window !== 'undefined' && (window.location.hostname === 'localhost' || window.location.hostname === '127.0.0.1')
-  ? (window.location.port === '3000' ? 'http://localhost:8000/api' : '/api')
-  : '/api';
+// API_BASE: Use absolute localhost URL when running in Vite dev mode (any port that isn't the backend port 8000)
+// In production (deployed), relative /api path is correct since backend serves the frontend.
+const isLocalDev = typeof window !== 'undefined' &&
+  (window.location.hostname === 'localhost' || window.location.hostname === '127.0.0.1') &&
+  window.location.port !== '8000';
+const API_BASE = isLocalDev ? 'http://localhost:8000/api' : '/api';
 
 export default function App() {
   const [viewMode, setViewMode] = useState('workflow'); // 'workflow' | 'dashboard'
@@ -22,12 +25,12 @@ export default function App() {
   const [loading, setLoading] = useState(false);
   const [notification, setNotification] = useState(null);
 
-  // Core Data State
+  // Core Data State - initialized empty; populated by loadInitialData()
   const [stats, setStats] = useState({
-    totalInvoices: 45,
-    matched: 40,
-    discrepancies: 5,
-    exposureRisk: 70580,
+    totalInvoices: 0,
+    matched: 0,
+    discrepancies: 0,
+    exposureRisk: 0,
     exposureRecovered: 0,
     pendingHumanGate: 0
   });
