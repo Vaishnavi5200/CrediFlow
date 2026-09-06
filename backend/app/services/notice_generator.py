@@ -116,18 +116,30 @@ def generate_bilingual_nudges(
     }
 
 
+def _get_reports_dir() -> str:
+    if os.environ.get("VERCEL"):
+        return "/tmp/reports"
+    local_dir = os.path.abspath(os.path.join(os.path.dirname(__file__), "../../../data/reports"))
+    try:
+        os.makedirs(local_dir, exist_ok=True)
+        return local_dir
+    except Exception:
+        return "/tmp/reports"
+
+
 def generate_pdf_notice(
     mismatch_data: Dict[str, Any],
-    output_dir: str = "/Users/vaishnavidwivedi/CrediFlow/data/reports",
+    output_dir: Optional[str] = None,
 ) -> str:
     """
     Generates a formal statutory GST ITC discrepancy notice in PDF format using ReportLab.
     Returns the absolute path to the generated PDF.
     """
-    os.makedirs(output_dir, exist_ok=True)
+    target_dir = output_dir or _get_reports_dir()
+    os.makedirs(target_dir, exist_ok=True)
     inv = mismatch_data.get("invoice_number", "UNKNOWN")
     filename = f"GST_ITC_Notice_{inv}_{datetime.now().strftime('%Y%m%d_%H%M%S')}.pdf"
-    filepath = os.path.join(output_dir, filename)
+    filepath = os.path.join(target_dir, filename)
 
     doc = SimpleDocTemplate(filepath, pagesize=letter, leftMargin=36, rightMargin=36, topMargin=36, bottomMargin=36)
     styles = getSampleStyleSheet()

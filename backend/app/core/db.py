@@ -10,12 +10,23 @@ import sqlite3
 from datetime import datetime, timezone
 from typing import Any, Dict, List, Optional
 
-DB_PATH = os.path.abspath(os.path.join(os.path.dirname(__file__), "../../../data/crediflow.db"))
+def _get_db_path() -> str:
+    if os.environ.get("VERCEL"):
+        return "/tmp/crediflow.db"
+    local_path = os.path.abspath(os.path.join(os.path.dirname(__file__), "../../../data/crediflow.db"))
+    try:
+        os.makedirs(os.path.dirname(local_path), exist_ok=True)
+        return local_path
+    except Exception:
+        return "/tmp/crediflow.db"
+
+DB_PATH = _get_db_path()
 
 
 def get_connection() -> sqlite3.Connection:
-    os.makedirs(os.path.dirname(DB_PATH), exist_ok=True)
-    conn = sqlite3.connect(DB_PATH)
+    db_path = _get_db_path()
+    os.makedirs(os.path.dirname(db_path), exist_ok=True)
+    conn = sqlite3.connect(db_path)
     conn.row_factory = sqlite3.Row
     return conn
 
