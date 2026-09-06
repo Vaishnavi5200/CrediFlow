@@ -11,11 +11,9 @@ import {
 } from 'lucide-react';
 import confetti from 'canvas-confetti';
 
-// API Base Resolution: localhost:8000 in dev, relative in production
-const isLocalDev = typeof window !== 'undefined' &&
-  (window.location.hostname === 'localhost' || window.location.hostname === '127.0.0.1') &&
-  window.location.port !== '8000';
-const API_BASE = isLocalDev ? 'http://localhost:8000/api' : '/api';
+// API Base — always relative: Vite proxy handles dev (:5173→:8000), Vercel handles prod
+const API_BASE = '/api';
+
 
 export default function App() {
   // Navigation & View Mode
