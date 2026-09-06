@@ -9,11 +9,12 @@ from __future__ import annotations
 import time
 import os
 from typing import Any, Dict, List, Optional
-from fastapi import APIRouter, HTTPException, BackgroundTasks, Query
+from fastapi import APIRouter, HTTPException, BackgroundTasks, Query, UploadFile, File
 from fastapi.responses import FileResponse
 from pydantic import BaseModel
 
 from ..core.gst_reconciliation import GSTReconciliationEngine, InvoiceRecord, MismatchType
+from ..core.file_parser import parse_file_content
 from ..core.synthetic_data_generator import (
     generate_demo_dataset,
     generate_batch_dataset,
@@ -257,6 +258,107 @@ def run_custom_reconciliation(req: CustomReconcileRequest):
     }
 
 
+@router.post("/upload/purchase-register")
+async def upload_purchase_register(file: UploadFile = File(...)):
+    """Upload and parse Purchase Register (CSV, XLSX, or JSON)."""
+    content = await file.read()
+    records, failed = parse_file_content(content, file.filename)
+    if not records and failed:
+        raise HTTPException(status_code=400, detail=f"Failed to parse {file.filename}: {failed}")
+    STATE["purchase_register"] = records
+    return {
+        "filename": file.filename,
+        "records_parsed": len(records),
+        "failed_rows_count": len(failed),
+        "total_taxable_value": sum(r.taxable_value for r in records),
+        "total_tax": sum(r.total_tax() for r in records)
+    }
+
+
+@router.post("/upload/gstr-2b")
+async def upload_gstr_2b(file: UploadFile = File(...)):
+    """Upload and parse GSTR-2B (CSV, XLSX, or JSON)."""
+    content = await file.read()
+    records, failed = parse_file_content(content, file.filename)
+    if not records and failed:
+        raise HTTPException(status_code=400, detail=f"Failed to parse {file.filename}: {failed}")
+    STATE["gstr_2b_records"] = records
+    return {
+        "filename": file.filename,
+        "records_parsed": len(records),
+        "failed_rows_count": len(failed),
+        "total_taxable_value": sum(r.taxable_value for r in records),
+        "total_tax": sum(r.total_tax() for r in records)
+    }
+
+
+@router.post("/upload-and-reconcile")
+async def upload_and_reconcile(
+    pr_file: UploadFile = File(...),
+    g2b_file: UploadFile = File(...)
+):
+    """
+    Automated Single-Step Ingestion & Reconciliation:
+    Uploads Purchase Register + GSTR-2B (CSV/XLSX/JSON) and immediately executes
+    100% deterministic matching and exposure quantification.
+    """
+    t0 = time.monotonic()
+    pr_content = await pr_file.read()
+    g2b_content = await g2b_file.read()
+
+    pr_records, pr_failed = parse_file_content(pr_content, pr_file.filename)
+    g2b_records, g2b_failed = parse_file_content(g2b_content, g2b_file.filename)
+
+    if not pr_records:
+        raise HTTPException(status_code=400, detail=f"No valid records in Purchase Register {pr_file.filename}")
+    if not g2b_records:
+        raise HTTPException(status_code=400, detail=f"No valid records in GSTR-2B {g2b_file.filename}")
+
+    discrepancies = engine.reconcile(pr_records, g2b_records)
+    elapsed_ms = (time.monotonic() - t0) * 1000
+
+    STATE["purchase_register"] = pr_records
+    STATE["gstr_2b_records"] = g2b_records
+    STATE["discrepancies"] = discrepancies
+    STATE["status"] = "RECONCILED"
+
+    disc_dicts = []
+    for d in discrepancies:
+        disc_dicts.append({
+            "id": d.id,
+            "invoice_number": d.invoice_number,
+            "supplier_gstin": d.supplier_gstin,
+            "supplier_name": d.supplier_name,
+            "mismatch_type": d.mismatch_type.value,
+            "severity": d.severity.value,
+            "itc_exposure_rupees": d.itc_exposure_rupees,
+            "purchase_register_tax": d.purchase_register_tax,
+            "gstr_2b_tax": d.gstr_2b_tax,
+            "taxable_value_diff": d.taxable_value_diff,
+            "details": d.details,
+            "rule_citation": d.rule_citation,
+            "is_high_value": d.is_high_value,
+            "requires_human_gate": d.requires_human_gate,
+            "status": d.status
+        })
+
+    return {
+        "execution_time_ms": round(elapsed_ms, 2),
+        "pr_filename": pr_file.filename,
+        "g2b_filename": g2b_file.filename,
+        "purchase_register_count": len(pr_records),
+        "gstr_2b_count": len(g2b_records),
+        "matched_count": len(pr_records) - len(discrepancies),
+        "discrepancies_count": len(discrepancies),
+        "total_itc_exposure_rupees": sum(d.itc_exposure_rupees for d in discrepancies),
+        "high_value_count": sum(1 for d in discrepancies if d.is_high_value),
+        "failed_pr_rows": len(pr_failed),
+        "failed_g2b_rows": len(g2b_failed),
+        "discrepancies": disc_dicts
+    }
+
+
+
 @router.post("/audit")
 async def run_multi_agent_audit(req: Optional[AuditRequest] = None):
     """
@@ -311,7 +413,7 @@ def get_human_gate_queue():
 def submit_human_decision(req: HumanDecisionRequest):
     """
     Applies the Finance Manager's decision (APPROVED / EDITED / REJECTED)
-    and logs immutable audit event.
+    and logs immutable audit event to SQLite database.
     """
     try:
         decision_enum = HumanDecision(req.decision.upper())
@@ -326,10 +428,29 @@ def submit_human_decision(req: HumanDecisionRequest):
             edited_message=req.edited_message,
             note=req.note
         )
+
+        # Log decision to SQLite DB
+        log_human_decision(
+            gate_id=entry.gate_id,
+            invoice_number=entry.mismatch_id,
+            decision=entry.decision.value,
+            decided_by=req.decided_by,
+            note=req.note or req.edited_message
+        )
+
+        # Affect downstream discrepancy state
+        disc = next((d for d in STATE.get("discrepancies", []) if d.invoice_number == entry.mismatch_id), None)
+        if disc:
+            if decision_enum == HumanDecision.REJECTED:
+                disc.status = "WITHHELD_MANUAL_AUDIT"
+            elif decision_enum in (HumanDecision.APPROVED, HumanDecision.EDITED):
+                disc.status = "APPROVED_FOR_NUDGE"
+
         return {
             "success": True,
             "gate_id": entry.gate_id,
             "status": entry.decision.value,
+            "mismatch_id": entry.mismatch_id,
             "audit_log": entry.audit_log
         }
     except KeyError:
@@ -340,10 +461,20 @@ def submit_human_decision(req: HumanDecisionRequest):
 
 @router.post("/nudge/dispatch")
 def dispatch_compliance_nudge(req: NudgeDispatchRequest):
-    """Dispatches statutory compliance notices via WhatsApp/Email and creates PDF."""
+    """
+    Dispatches statutory compliance notices via WhatsApp/Email and creates PDF.
+    Enforces Human Gate: Blocked if human reviewer REJECTED.
+    """
+    # Check Human Gate queue
+    pending_entry = next((e for e in gate._queue.values() if e.mismatch_id == req.invoice_number), None)
+    if pending_entry and pending_entry.decision == HumanDecision.REJECTED:
+        raise HTTPException(
+            status_code=400,
+            detail=f"Notice blocked: Invoice {req.invoice_number} was REJECTED during human gate review."
+        )
+
     disc = next((d for d in STATE["discrepancies"] if d.invoice_number == req.invoice_number), None)
     if not disc:
-        # Fallback dictionary
         m_dict = {
             "invoice_number": req.invoice_number,
             "supplier_name": "M/s Rajesh Traders",
@@ -369,15 +500,31 @@ def dispatch_compliance_nudge(req: NudgeDispatchRequest):
             "root_cause_classification": "B2B_FILED_AS_B2C"
         }
 
+    # Override message if human reviewer edited it
+    if pending_entry and pending_entry.decision == HumanDecision.EDITED and pending_entry.edited_message:
+        m_dict["custom_message"] = pending_entry.edited_message
+
     event = dispatcher.dispatch_nudge(m_dict, channels=req.channels)
     body_text = event["whatsapp_payload"].get("body", "")
     preview = body_text[:200] + ("..." if len(body_text) > 200 else "")
+
+    # Persist notice dispatch to SQLite
+    pdf_path = event.get("pdf_path") or ""
+    log_notice_dispatch(
+        invoice_number=req.invoice_number,
+        supplier_name=m_dict["supplier_name"],
+        channel="+".join(req.channels),
+        pdf_path=pdf_path,
+        status="DISPATCHED"
+    )
+
     return {
         "success": True,
         "dispatch_id": event["dispatch_id"],
         "invoice_number": req.invoice_number,
         "channels": event["channels"],
         "pdf_generated": bool(event["pdf_path"]),
+        "pdf_path": event.get("pdf_path"),
         "status": "DISPATCHED",
         "email_status": event.get("email_status", "SIMULATED_DISPATCH"),
         "whatsapp_preview": preview
@@ -500,6 +647,7 @@ def run_batch_benchmarks(count: int = Query(1000, ge=50, le=2000)):
     return {
         "records_processed": count,
         "wall_clock_time_ms": round(elapsed_ms, 2),
+        "processing_time_ms": round(elapsed_ms, 2),
         "wall_clock_time_sec": round(elapsed_ms / 1000, 3),
         "throughput_invoices_per_sec": throughput,
         "discrepancies_detected": len(batch_discs),
@@ -510,7 +658,12 @@ def run_batch_benchmarks(count: int = Query(1000, ge=50, le=2000)):
         "estimated_total_tokens": total_tokens,
         "estimated_cost_usd": cost_usd,
         "estimated_cost_inr": cost_inr,
+        "actual_cost_usd": cost_usd,
+        "actual_cost_inr": cost_inr,
+        "cost_usd": cost_usd,
+        "cost_inr": cost_inr,
         "estimated_cost_per_record_usd": cost_per_record_usd,
+        "cost_per_record_usd": cost_per_record_usd,
         "cost_basis": "ESTIMATE: GPT-4o-mini pricing ~$0.0003/1k tokens. Actual cost depends on RocketRide Cloud live execution.",
         "mismatch_distribution": by_type,
         "resilience_summary": f"{count} processed · {malformed_count} malformed · {human_review_count} human review",

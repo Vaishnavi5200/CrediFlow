@@ -232,6 +232,16 @@ class HumanGate:
         entry.apply_decision(decision, decided_by, edited_message, note)
         return entry
 
+    def decide(
+        self,
+        gate_id: str,
+        decision: HumanDecision,
+        decided_by: str = "finance_manager",
+        edited_message: Optional[str] = None,
+        note: Optional[str] = None,
+    ) -> HumanGateEntry:
+        return self.apply_decision(gate_id, decision, decided_by, edited_message, note)
+
     def list_all(self) -> List[Dict[str, Any]]:
         return [e.to_dict() for e in self._queue.values()]
 

@@ -154,14 +154,19 @@ def get_db_summary() -> Dict[str, Any]:
     last_bench_dict = dict(last_bench) if last_bench else None
     conn.close()
     
+    db_size = os.path.getsize(DB_PATH) if os.path.exists(DB_PATH) else 0
     return {
         "db_path": DB_PATH,
-        "db_size_bytes": os.path.getsize(DB_PATH) if os.path.exists(DB_PATH) else 0,
+        "database_path": DB_PATH,
+        "database_exists": os.path.exists(DB_PATH),
+        "db_size_bytes": db_size,
+        "database_size_bytes": db_size,
         "tables": {
             "benchmark_runs": bench_count,
             "audit_ledger": audit_count,
             "human_decisions": decision_count,
             "notice_dispatches": notice_count,
         },
-        "latest_benchmark": last_bench_dict
+        "latest_benchmark": last_bench_dict,
+        "last_benchmark": last_bench_dict
     }
