@@ -26,6 +26,7 @@ from ..services.human_gate import HumanGate, HumanDecision
 from ..services.notice_generator import generate_pdf_notice, generate_bilingual_nudges
 from ..services.nudge_dispatcher import NudgeDispatcher
 from ..services.audit_service import AuditService
+from ..core.db import get_db_summary, log_benchmark_run, log_human_decision, log_notice_dispatch
 
 router = APIRouter(prefix="/api")
 
@@ -82,6 +83,12 @@ def health():
         "human_gate_pending": gate.pending_count,
         "discrepancies_count": len(STATE["discrepancies"])
     }
+
+
+@router.get("/db/summary")
+def get_database_summary():
+    """Returns real SQLite database verification status, table row counts, and last recorded benchmark."""
+    return get_db_summary()
 
 
 @router.get("/demo-data")
@@ -473,6 +480,22 @@ def run_batch_benchmarks(count: int = Query(1000, ge=50, le=2000)):
     for d in batch_discs:
         by_type.setdefault(d.mismatch_type.value, 0)
         by_type[d.mismatch_type.value] += 1
+
+    # Persist benchmark run to SQLite database
+    import uuid
+    run_id = f"batch-run-{int(time.time())}-{uuid.uuid4().hex[:6]}"
+    log_benchmark_run({
+        "run_id": run_id,
+        "count": count,
+        "runtime_ms": round(elapsed_ms, 2),
+        "throughput_per_sec": throughput,
+        "total_exposure_inr": round(total_exposure, 2),
+        "discrepancies_count": len(batch_discs),
+        "cost_usd": cost_usd,
+        "cost_inr": cost_inr,
+        "retries": 0,
+        "escalations": human_review_count
+    })
 
     return {
         "records_processed": count,
