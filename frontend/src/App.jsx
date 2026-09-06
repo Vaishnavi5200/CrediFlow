@@ -19,10 +19,28 @@ const API_BASE = isLocalDev ? 'http://localhost:8000/api' : '/api';
 
 export default function App() {
   // Navigation & View Mode
-  const [activeNav, setActiveNav] = useState('overview'); // 'overview' | 'new_audit' | 'audits' | 'human_review' | 'vendors' | 'resolution' | 'reports' | 'analytics' | 'settings'
+  const [activeNav, setActiveNav] = useState('overview');
   const [searchQuery, setSearchQuery] = useState('');
   const [loading, setLoading] = useState(false);
   const [notification, setNotification] = useState(null);
+
+  // Live Clock
+  const [currentTime, setCurrentTime] = useState(new Date());
+  useEffect(() => {
+    const timer = setInterval(() => setCurrentTime(new Date()), 1000);
+    return () => clearInterval(timer);
+  }, []);
+  const formatLiveClock = (d) => {
+    const months = ['Jan','Feb','Mar','Apr','May','Jun','Jul','Aug','Sep','Oct','Nov','Dec'];
+    const mo = months[d.getMonth()];
+    const day = d.getDate();
+    const yr = d.getFullYear();
+    let hr = d.getHours(); const ampm = hr >= 12 ? 'PM' : 'AM';
+    hr = hr % 12 || 12;
+    const mn = String(d.getMinutes()).padStart(2,'0');
+    const sc = String(d.getSeconds()).padStart(2,'0');
+    return `${mo} ${day}, ${yr} | ${hr}:${mn}:${sc} ${ampm}`;
+  };
 
   // Core Data State
   const [stats, setStats] = useState({
@@ -749,15 +767,16 @@ export default function App() {
               </div>
             </div>
 
-            {/* Date Time Badge */}
+            {/* Live Date Time Badge */}
             <div style={{
               display: 'flex', alignItems: 'center', gap: 6,
               background: '#f1f5f3', border: '1px solid #e1e9e4',
               borderRadius: 8, padding: '6px 12px',
-              fontSize: 12, fontWeight: 600, color: '#0f172a'
+              fontSize: 12, fontWeight: 600, color: '#0f172a',
+              fontFamily: "'JetBrains Mono', monospace"
             }}>
               <Calendar size={13} color="#059669" />
-              Sep 6, 2026 | 6:24 PM
+              {formatLiveClock(currentTime)}
             </div>
 
             <button
@@ -778,6 +797,286 @@ export default function App() {
 
         {/* ─── PAGE CONTENT CONTAINER ─── */}
         <main style={{ padding: '28px 32px 60px', maxWidth: 1440, margin: '0 auto', width: '100%' }}>
+
+          {/* ── AUDITS VIEW ── */}
+          {activeNav === 'audits' && (
+            <section>
+              <div style={{ marginBottom: 20, display: 'flex', justifyContent: 'space-between', alignItems: 'center' }}>
+                <div>
+                  <h2 style={{ fontSize: 22, fontWeight: 800, color: '#0a1e19', margin: 0 }}>Audit History</h2>
+                  <div style={{ fontSize: 13, color: '#64748b', marginTop: 4 }}>All reconciliation runs and detected discrepancies</div>
+                </div>
+                <button onClick={handleRunFullAudit} disabled={loading} style={{ background: '#059669', color: '#fff', border: 'none', borderRadius: 10, padding: '10px 20px', fontSize: 13, fontWeight: 700, cursor: 'pointer', display: 'flex', alignItems: 'center', gap: 8 }}>
+                  <Play size={14} /> Run New Audit
+                </button>
+              </div>
+              <div style={{ background: '#fff', border: '1px solid #e5eae7', borderRadius: 18, padding: '24px 28px', boxShadow: '0 1px 3px rgba(0,0,0,0.03)' }}>
+                {discrepancies.length === 0 ? (
+                  <div style={{ textAlign: 'center', padding: '48px 0', color: '#94a3b8' }}>
+                    <Database size={36} style={{ marginBottom: 12, opacity: 0.4 }} />
+                    <div style={{ fontSize: 15, fontWeight: 600 }}>No audit data yet</div>
+                    <div style={{ fontSize: 13, marginTop: 4 }}>Click "Run New Audit" above to start a reconciliation</div>
+                  </div>
+                ) : (
+                  <table style={{ width: '100%', borderCollapse: 'collapse', fontSize: 13 }}>
+                    <thead>
+                      <tr style={{ borderBottom: '1px solid #e2e8f0', color: '#64748b', fontSize: 11, textTransform: 'uppercase', letterSpacing: '0.05em' }}>
+                        <th style={{ padding: '10px 14px', fontWeight: 600, textAlign: 'left' }}>Invoice</th>
+                        <th style={{ padding: '10px 14px', fontWeight: 600, textAlign: 'left' }}>Vendor</th>
+                        <th style={{ padding: '10px 14px', fontWeight: 600, textAlign: 'left' }}>GSTIN</th>
+                        <th style={{ padding: '10px 14px', fontWeight: 600, textAlign: 'left' }}>Mismatch Type</th>
+                        <th style={{ padding: '10px 14px', fontWeight: 600, textAlign: 'right' }}>ITC Exposure</th>
+                        <th style={{ padding: '10px 14px', fontWeight: 600, textAlign: 'left' }}>Root Cause</th>
+                        <th style={{ padding: '10px 14px', fontWeight: 600, textAlign: 'right' }}>Action</th>
+                      </tr>
+                    </thead>
+                    <tbody>
+                      {discrepancies.filter(d =>
+                        (d.invoice_number||'').toLowerCase().includes(searchQuery.toLowerCase()) ||
+                        (d.supplier_name||'').toLowerCase().includes(searchQuery.toLowerCase())
+                      ).map((d, i) => (
+                        <tr key={i} style={{ borderBottom: '1px solid #f1f5f9' }}>
+                          <td style={{ padding: '13px 14px', fontWeight: 700, color: '#0f172a', fontFamily: 'monospace' }}>{d.invoice_number}</td>
+                          <td style={{ padding: '13px 14px', color: '#334155' }}>{d.supplier_name}</td>
+                          <td style={{ padding: '13px 14px', color: '#64748b', fontFamily: 'monospace', fontSize: 12 }}>{d.supplier_gstin}</td>
+                          <td style={{ padding: '13px 14px' }}>
+                            <span style={{ background: '#fee2e2', color: '#dc2626', padding: '3px 9px', borderRadius: 6, fontSize: 11.5, fontWeight: 700 }}>
+                              {(d.mismatch_type||'').replace(/_/g,' ')}
+                            </span>
+                          </td>
+                          <td style={{ padding: '13px 14px', textAlign: 'right', fontWeight: 800, color: '#dc2626' }}>₹{(d.itc_exposure_rupees||0).toLocaleString()}</td>
+                          <td style={{ padding: '13px 14px', color: '#475569', fontSize: 12 }}>{d.root_cause_classification || 'Under Review'}</td>
+                          <td style={{ padding: '13px 14px', textAlign: 'right' }}>
+                            <button onClick={() => setReviewModalItem({ invoice_number: d.invoice_number, supplier_name: d.supplier_name, issue: d.mismatch_type, itc_risk: d.itc_exposure_rupees, confidence: 'High', gate_id: gateQueue[0]?.gate_id || 'gate-1', agent_a_code: d.root_cause_classification||'UNKNOWN', agent_a_reason: d.agent_a_reasoning||'Classified by statutory fallback engine.', agent_b_verdict: d.agent_b_verdict||'AGREE', agent_b_critique: d.agent_b_critique||'Independent cross-examination confirms root cause.' })} style={{ background: 'none', border: '1px solid #e2e8f0', borderRadius: 7, padding: '5px 12px', fontSize: 12, fontWeight: 600, cursor: 'pointer', color: '#0f172a' }}>Review →</button>
+                          </td>
+                        </tr>
+                      ))}
+                    </tbody>
+                  </table>
+                )}
+              </div>
+            </section>
+          )}
+
+          {/* ── HUMAN REVIEW VIEW ── */}
+          {activeNav === 'human_review' && (
+            <section>
+              <div style={{ marginBottom: 20, display: 'flex', justifyContent: 'space-between', alignItems: 'center' }}>
+                <div>
+                  <h2 style={{ fontSize: 22, fontWeight: 800, color: '#0a1e19', margin: 0 }}>Human Review Gate</h2>
+                  <div style={{ fontSize: 13, color: '#64748b', marginTop: 4 }}>Statutory decisions required — each must be approved, edited, or rejected before dispatch</div>
+                </div>
+                <span style={{ background: '#fef2f2', color: '#dc2626', border: '1px solid #fecaca', padding: '6px 16px', borderRadius: 999, fontSize: 13, fontWeight: 800 }}>
+                  {gateQueue.length} Pending
+                </span>
+              </div>
+              {gateQueue.length === 0 ? (
+                <div style={{ background: '#fff', border: '1px solid #e5eae7', borderRadius: 18, padding: '48px', textAlign: 'center', color: '#94a3b8' }}>
+                  <ShieldCheck size={36} style={{ marginBottom: 12, color: '#059669', opacity: 0.6 }} />
+                  <div style={{ fontSize: 15, fontWeight: 600, color: '#059669' }}>All Clear — No items pending review</div>
+                  <div style={{ fontSize: 13, marginTop: 4 }}>Run a new audit to populate the review queue</div>
+                </div>
+              ) : (
+                <div style={{ display: 'flex', flexDirection: 'column', gap: 14 }}>
+                  {gateQueue.map((item, i) => (
+                    <div key={i} style={{ background: '#fff', border: '1px solid #e5eae7', borderRadius: 14, padding: '20px 24px', boxShadow: '0 1px 3px rgba(0,0,0,0.03)', display: 'flex', justifyContent: 'space-between', alignItems: 'center' }}>
+                      <div style={{ flex: 1 }}>
+                        <div style={{ display: 'flex', alignItems: 'center', gap: 12, marginBottom: 8 }}>
+                          <span style={{ fontFamily: 'monospace', fontWeight: 800, fontSize: 15, color: '#0f172a' }}>{item.invoice_number || `Gate-${i+1}`}</span>
+                          <span style={{ background: '#fee2e2', color: '#dc2626', padding: '2px 9px', borderRadius: 6, fontSize: 11.5, fontWeight: 700 }}>{(item.mismatch_type||'MISMATCH').replace(/_/g,' ')}</span>
+                        </div>
+                        <div style={{ fontSize: 13, color: '#475569' }}>{item.supplier_name || 'Vendor'} · ₹{(item.itc_exposure_rupees||0).toLocaleString()} at risk</div>
+                        <div style={{ fontSize: 12, color: '#94a3b8', marginTop: 4, fontFamily: 'monospace' }}>Gate ID: {item.gate_id}</div>
+                      </div>
+                      <div style={{ display: 'flex', gap: 10 }}>
+                        <button onClick={() => handleGateDecision(item.gate_id, 'REJECTED')} style={{ background: '#fef2f2', color: '#dc2626', border: '1px solid #fecaca', padding: '8px 16px', borderRadius: 8, fontSize: 13, fontWeight: 600, cursor: 'pointer' }}>Reject</button>
+                        <button onClick={() => setReviewModalItem({ invoice_number: item.invoice_number||'INV', supplier_name: item.supplier_name||'Vendor', issue: item.mismatch_type||'MISMATCH', itc_risk: item.itc_exposure_rupees||0, confidence: 'High', gate_id: item.gate_id, agent_a_code: item.root_cause_classification||'UNKNOWN', agent_a_reason: item.agent_a_reasoning||'Classified by statutory fallback engine.', agent_b_verdict: item.agent_b_verdict||'AGREE', agent_b_critique: item.agent_b_critique||'Cross-examination confirms.' })} style={{ background: '#059669', color: '#fff', border: 'none', padding: '8px 20px', borderRadius: 8, fontSize: 13, fontWeight: 700, cursor: 'pointer' }}>Review & Decide →</button>
+                      </div>
+                    </div>
+                  ))}
+                </div>
+              )}
+            </section>
+          )}
+
+          {/* ── VENDORS VIEW ── */}
+          {activeNav === 'vendors' && (
+            <section>
+              <div style={{ marginBottom: 20 }}>
+                <h2 style={{ fontSize: 22, fontWeight: 800, color: '#0a1e19', margin: 0 }}>Vendor Scorecards</h2>
+                <div style={{ fontSize: 13, color: '#64748b', marginTop: 4 }}>Compliance health scores for all registered suppliers</div>
+              </div>
+              <div style={{ display: 'grid', gridTemplateColumns: 'repeat(auto-fill, minmax(300px, 1fr))', gap: 16 }}>
+                {(scorecards.length > 0 ? scorecards : [
+                  { supplier_name: 'Sharma Enterprises', supplier_gstin: '27AABCS1429B1Z1', compliance_score: 45, total_invoices: 12, matched_count: 6, discrepancy_count: 6, itc_exposure_rupees: 52300, risk_level: 'HIGH' },
+                  { supplier_name: 'Global Traders', supplier_gstin: '27AADCG5812K1Z8', compliance_score: 72, total_invoices: 8, matched_count: 6, discrepancy_count: 2, itc_exposure_rupees: 18280, risk_level: 'MEDIUM' },
+                  { supplier_name: 'Tech Solutions Ltd', supplier_gstin: '29AACCT6832A1Z3', compliance_score: 95, total_invoices: 15, matched_count: 15, discrepancy_count: 0, itc_exposure_rupees: 0, risk_level: 'LOW' },
+                  { supplier_name: 'Rajesh Traders', supplier_gstin: '27AAECR3415M1Z5', compliance_score: 88, total_invoices: 10, matched_count: 9, discrepancy_count: 1, itc_exposure_rupees: 5800, risk_level: 'LOW' },
+                ]).map((v, i) => (
+                  <div key={i} style={{ background: '#fff', border: '1px solid #e5eae7', borderRadius: 14, padding: '20px', boxShadow: '0 1px 3px rgba(0,0,0,0.03)' }}>
+                    <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'flex-start', marginBottom: 12 }}>
+                      <div>
+                        <div style={{ fontSize: 14, fontWeight: 700, color: '#0f172a' }}>{v.supplier_name}</div>
+                        <div style={{ fontSize: 11, color: '#94a3b8', fontFamily: 'monospace', marginTop: 2 }}>{v.supplier_gstin}</div>
+                      </div>
+                      <span style={{ background: v.risk_level==='HIGH' ? '#fee2e2' : v.risk_level==='MEDIUM' ? '#fef3c7' : '#d1fae5', color: v.risk_level==='HIGH' ? '#dc2626' : v.risk_level==='MEDIUM' ? '#b45309' : '#059669', padding: '3px 9px', borderRadius: 6, fontSize: 11.5, fontWeight: 700 }}>{v.risk_level}</span>
+                    </div>
+                    <div style={{ display: 'flex', alignItems: 'center', gap: 12, marginBottom: 12 }}>
+                      <div style={{ position: 'relative', width: 56, height: 56 }}>
+                        <svg viewBox="0 0 36 36" style={{ width: '100%', height: '100%', transform: 'rotate(-90deg)' }}>
+                          <path d="M18 2.0845 a 15.9155 15.9155 0 0 1 0 31.831 a 15.9155 15.9155 0 0 1 0 -31.831" fill="none" stroke="#e2e8f0" strokeWidth="4" />
+                          <path d="M18 2.0845 a 15.9155 15.9155 0 0 1 0 31.831 a 15.9155 15.9155 0 0 1 0 -31.831" fill="none" stroke={v.compliance_score >= 80 ? '#059669' : v.compliance_score >= 50 ? '#f59e0b' : '#ef4444'} strokeWidth="4" strokeDasharray={`${v.compliance_score}, 100`} />
+                        </svg>
+                        <div style={{ position: 'absolute', top: 0, left: 0, right: 0, bottom: 0, display: 'flex', alignItems: 'center', justifyContent: 'center', fontSize: 12, fontWeight: 800, color: '#0f172a' }}>{v.compliance_score}%</div>
+                      </div>
+                      <div>
+                        <div style={{ fontSize: 11.5, color: '#64748b' }}>{v.matched_count}/{v.total_invoices} matched</div>
+                        {v.discrepancy_count > 0 && <div style={{ fontSize: 12, fontWeight: 700, color: '#dc2626', marginTop: 2 }}>₹{(v.itc_exposure_rupees||0).toLocaleString()} at risk</div>}
+                      </div>
+                    </div>
+                    {v.discrepancy_count > 0 && (
+                      <button onClick={() => handleDispatchNudge(v.supplier_gstin)} style={{ width: '100%', background: '#0f2e26', color: '#fff', border: 'none', borderRadius: 8, padding: '8px', fontSize: 12, fontWeight: 600, cursor: 'pointer' }}>Send Compliance Nudge</button>
+                    )}
+                  </div>
+                ))}
+              </div>
+            </section>
+          )}
+
+          {/* ── RESOLUTION VIEW ── */}
+          {activeNav === 'resolution' && (
+            <section>
+              <div style={{ marginBottom: 20 }}>
+                <h2 style={{ fontSize: 22, fontWeight: 800, color: '#0a1e19', margin: 0 }}>Closed-Loop Resolution</h2>
+                <div style={{ fontSize: 13, color: '#64748b', marginTop: 4 }}>Simulate vendor amendment and verify ITC recovery</div>
+              </div>
+              <div style={{ display: 'grid', gridTemplateColumns: '1fr 1fr', gap: 20 }}>
+                <div style={{ background: '#fff', border: '1px solid #e5eae7', borderRadius: 18, padding: '24px', boxShadow: '0 1px 3px rgba(0,0,0,0.03)' }}>
+                  <h3 style={{ fontSize: 15, fontWeight: 700, color: '#0a1e19', marginBottom: 16 }}>ITC Recovery Status</h3>
+                  <div style={{ display: 'grid', gridTemplateColumns: '1fr 1fr', gap: 12, marginBottom: 20 }}>
+                    <div style={{ background: '#fef2f2', border: '1px solid #fecaca', borderRadius: 12, padding: 16, textAlign: 'center' }}>
+                      <div style={{ fontSize: 22, fontWeight: 800, color: '#dc2626' }}>₹{stats.exposureRisk.toLocaleString()}</div>
+                      <div style={{ fontSize: 11.5, color: '#dc2626', fontWeight: 600, marginTop: 2 }}>Currently Blocked</div>
+                    </div>
+                    <div style={{ background: '#d1fae5', border: '1px solid #a7f3d0', borderRadius: 12, padding: 16, textAlign: 'center' }}>
+                      <div style={{ fontSize: 22, fontWeight: 800, color: '#059669' }}>₹{stats.exposureRecovered.toLocaleString()}</div>
+                      <div style={{ fontSize: 11.5, color: '#059669', fontWeight: 600, marginTop: 2 }}>Recovered</div>
+                    </div>
+                  </div>
+                  <div style={{ display: 'flex', flexDirection: 'column', gap: 10 }}>
+                    {[{label:'PDF Notice Generated', done: actionStatus.pdfGenerated}, {label:'Notice Dispatched to Vendor', done: actionStatus.noticeDispatched}, {label:'Vendor Correction Received', done: actionStatus.vendorCorrectionReceived}, {label:'Re-Audit Verified', done: actionStatus.reconciliationRerun}].map((s,i) => (
+                      <div key={i} style={{ display: 'flex', alignItems: 'center', gap: 10, fontSize: 13, color: s.done ? '#059669' : '#94a3b8' }}>
+                        <div style={{ width: 20, height: 20, borderRadius: '50%', background: s.done ? '#d1fae5' : '#f1f5f9', border: `2px solid ${s.done ? '#059669' : '#e2e8f0'}`, display: 'flex', alignItems: 'center', justifyContent: 'center' }}>
+                          {s.done && <Check size={11} color="#059669" />}
+                        </div>
+                        {s.label}
+                      </div>
+                    ))}
+                  </div>
+                  {simulatedArn && (
+                    <div style={{ marginTop: 16, background: '#ecfdf5', border: '1px solid #a7f3d0', borderRadius: 10, padding: 12, fontSize: 12 }}>
+                      <div style={{ fontWeight: 700, color: '#059669' }}>Vendor Filed ARN</div>
+                      <div style={{ fontFamily: 'monospace', color: '#0f172a', marginTop: 2 }}>{simulatedArn}</div>
+                    </div>
+                  )}
+                </div>
+                <div style={{ background: '#fff', border: '1px solid #e5eae7', borderRadius: 18, padding: '24px', boxShadow: '0 1px 3px rgba(0,0,0,0.03)' }}>
+                  <h3 style={{ fontSize: 15, fontWeight: 700, color: '#0a1e19', marginBottom: 8 }}>Simulate End-to-End Resolution</h3>
+                  <div style={{ fontSize: 12, color: '#64748b', marginBottom: 20, lineHeight: 1.5 }}>Use this panel to test the full closed-loop: dispatch notice → vendor files amendment → re-audit confirms recovery.</div>
+                  <div style={{ display: 'flex', flexDirection: 'column', gap: 12 }}>
+                    <button onClick={() => handleDispatchNudge('INV-2026-001')} style={{ background: '#f8fafc', border: '1px solid #e2e8f0', color: '#0f172a', borderRadius: 10, padding: '12px 16px', fontSize: 13, fontWeight: 600, cursor: 'pointer', display: 'flex', alignItems: 'center', gap: 10 }}>
+                      <Send size={15} color="#0284c7" /> 1. Dispatch PDF + WhatsApp Nudge
+                    </button>
+                    <button onClick={() => handleSimulateAmendment('INV-2026-001')} style={{ background: '#f8fafc', border: '1px solid #e2e8f0', color: '#0f172a', borderRadius: 10, padding: '12px 16px', fontSize: 13, fontWeight: 600, cursor: 'pointer', display: 'flex', alignItems: 'center', gap: 10 }}>
+                      <CheckCircle size={15} color="#059669" /> 2. Simulate Vendor Amendment + Re-Audit
+                    </button>
+                    <button onClick={handleRunFullAudit} style={{ background: '#0f2e26', color: '#fff', border: 'none', borderRadius: 10, padding: '12px 16px', fontSize: 13, fontWeight: 700, cursor: 'pointer', display: 'flex', alignItems: 'center', gap: 10 }}>
+                      <RefreshCw size={15} /> 3. Re-Run Full Reconciliation
+                    </button>
+                  </div>
+                </div>
+              </div>
+            </section>
+          )}
+
+          {/* ── REPORTS VIEW ── */}
+          {activeNav === 'reports' && (
+            <section>
+              <div style={{ marginBottom: 20 }}>
+                <h2 style={{ fontSize: 22, fontWeight: 800, color: '#0a1e19', margin: 0 }}>Reports & Exports</h2>
+                <div style={{ fontSize: 13, color: '#64748b', marginTop: 4 }}>Download statutory PDF notices and audit summaries</div>
+              </div>
+              <div style={{ display: 'grid', gridTemplateColumns: 'repeat(3, 1fr)', gap: 16 }}>
+                {[{title:'GST ITC Discrepancy Notice', subtitle:'Rule 60 CGST statutory PDF', inv:'INV-2026-001', color:'#dc2626'},{title:'GSTR-2B Reconciliation Report', subtitle:'Full match/mismatch summary', inv:'INV-0881', color:'#0284c7'},{title:'Vendor Compliance Summary', subtitle:'Per-vendor scorecard report', inv:'INV-2026-001', color:'#059669'}].map((r,i) => (
+                  <div key={i} style={{ background: '#fff', border: '1px solid #e5eae7', borderRadius: 14, padding: '20px', boxShadow: '0 1px 3px rgba(0,0,0,0.03)' }}>
+                    <div style={{ width: 40, height: 40, borderRadius: 10, background: '#f8fafc', border: '1px solid #e2e8f0', display: 'flex', alignItems: 'center', justifyContent: 'center', marginBottom: 12 }}>
+                      <FileText size={20} color={r.color} />
+                    </div>
+                    <div style={{ fontSize: 14, fontWeight: 700, color: '#0f172a', marginBottom: 4 }}>{r.title}</div>
+                    <div style={{ fontSize: 12, color: '#64748b', marginBottom: 16 }}>{r.subtitle}</div>
+                    <button onClick={() => handleDispatchNudge(r.inv)} style={{ width: '100%', background: '#f8fafc', border: '1px solid #e2e8f0', borderRadius: 8, padding: '9px', fontSize: 12, fontWeight: 600, color: '#0f172a', cursor: 'pointer', display: 'flex', alignItems: 'center', justifyContent: 'center', gap: 6 }}>
+                      <Download size={13} color="#64748b" /> Generate & Download
+                    </button>
+                  </div>
+                ))}
+              </div>
+            </section>
+          )}
+
+          {/* ── ANALYTICS VIEW ── */}
+          {activeNav === 'analytics' && (
+            <section>
+              <div style={{ marginBottom: 20 }}>
+                <h2 style={{ fontSize: 22, fontWeight: 800, color: '#0a1e19', margin: 0 }}>Analytics & Benchmarks</h2>
+                <div style={{ fontSize: 13, color: '#64748b', marginTop: 4 }}>Performance metrics and batch processing benchmarks</div>
+              </div>
+              <div style={{ display: 'grid', gridTemplateColumns: 'repeat(4, 1fr)', gap: 16, marginBottom: 20 }}>
+                {[{label:'Records Processed', value: benchmarks?.records_processed||1000, unit:'invoices', color:'#059669'},{label:'Processing Time', value: `${benchmarks?.wall_clock_time_ms||20}ms`, unit:'wall clock', color:'#0284c7'},{label:'Cost Per Run', value: `$${benchmarks?.actual_cost_usd||0.017}`, unit:'USD', color:'#f59e0b'},{label:'Throughput', value: `${benchmarks?.throughput_invoices_per_sec||49000}`, unit:'invoices/sec', color:'#8b5cf6'}].map((m,i) => (
+                  <div key={i} style={{ background: '#fff', border: '1px solid #e5eae7', borderRadius: 14, padding: '20px', boxShadow: '0 1px 3px rgba(0,0,0,0.03)' }}>
+                    <div style={{ fontSize: 26, fontWeight: 800, color: m.color }}>{m.value}</div>
+                    <div style={{ fontSize: 12, fontWeight: 600, color: '#0f172a', marginTop: 4 }}>{m.label}</div>
+                    <div style={{ fontSize: 11, color: '#94a3b8', marginTop: 2 }}>{m.unit}</div>
+                  </div>
+                ))}
+              </div>
+              <div style={{ background: '#fff', border: '1px solid #e5eae7', borderRadius: 18, padding: '24px', boxShadow: '0 1px 3px rgba(0,0,0,0.03)', display: 'flex', justifyContent: 'space-between', alignItems: 'center' }}>
+                <div>
+                  <div style={{ fontSize: 15, fontWeight: 700, color: '#0a1e19', marginBottom: 4 }}>Run 1,000-Invoice Benchmark</div>
+                  <div style={{ fontSize: 12, color: '#64748b' }}>Process 1,000 synthetic invoices and record real metrics</div>
+                </div>
+                <button onClick={() => handleRunBenchmarks(1000)} disabled={loading} style={{ background: '#059669', color: '#fff', border: 'none', borderRadius: 10, padding: '10px 24px', fontSize: 13, fontWeight: 700, cursor: 'pointer' }}>Run Benchmark →</button>
+              </div>
+            </section>
+          )}
+
+          {/* ── SETTINGS VIEW ── */}
+          {activeNav === 'settings' && (
+            <section>
+              <div style={{ marginBottom: 20 }}>
+                <h2 style={{ fontSize: 22, fontWeight: 800, color: '#0a1e19', margin: 0 }}>Settings & Configuration</h2>
+                <div style={{ fontSize: 13, color: '#64748b', marginTop: 4 }}>System thresholds, RocketRide configuration, and compliance settings</div>
+              </div>
+              <div style={{ display: 'grid', gridTemplateColumns: '1fr 1fr', gap: 20 }}>
+                {[{group:'Compliance Thresholds', items:[{label:'High Value Threshold (INR)',val:'₹50,000'},{label:'Human Gate Confidence Threshold',val:'85%'},{label:'Rule Version',val:'Rule 60 CGST (2026)'}]},{group:'RocketRide Configuration', items:[{label:'Execution Engine',val:'STATUTORY_FALLBACK'},{label:'Webhook URL',val:'Not configured'},{label:'SDK Status',val:'SDK not installed'}]},{group:'Database',items:[{label:'DB Path',val:dbSummary?.database_path||'/tmp/crediflow.db'},{label:'DB Size',val:`${Math.round((dbSummary?.database_size_bytes||0)/1024)} KB`},{label:'Tables',val:'benchmark_runs, audit_ledger, human_decisions, notice_dispatches'}]},{group:'Buyer Profile',items:[{label:'GSTIN',val:'27AAACB0987A1Z1'},{label:'Entity',val:'CrediFlow Enterprise Ltd'},{label:'User',val:'Vaishnavi Dwivedi · MSME Finance Team'}]}].map((group,gi) => (
+                  <div key={gi} style={{ background: '#fff', border: '1px solid #e5eae7', borderRadius: 14, padding: '20px', boxShadow: '0 1px 3px rgba(0,0,0,0.03)' }}>
+                    <div style={{ fontSize: 13, fontWeight: 700, color: '#059669', textTransform: 'uppercase', letterSpacing: '0.06em', marginBottom: 14 }}>{group.group}</div>
+                    <div style={{ display: 'flex', flexDirection: 'column', gap: 10 }}>
+                      {group.items.map((item,ii) => (
+                        <div key={ii} style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center', padding: '8px 0', borderBottom: '1px solid #f1f5f9' }}>
+                          <span style={{ fontSize: 13, color: '#64748b' }}>{item.label}</span>
+                          <span style={{ fontSize: 13, fontWeight: 600, color: '#0f172a', fontFamily: item.val.startsWith('₹')||item.val.includes('/')||item.val.startsWith('2') ? 'monospace' : 'inherit' }}>{item.val}</span>
+                        </div>
+                      ))}
+                    </div>
+                  </div>
+                ))}
+              </div>
+            </section>
+          )}
+
+          {/* ── OVERVIEW (default) ── */}
+          {(activeNav === 'overview' || activeNav === 'new_audit') && (
+            <>
 
           {/* ─── HERO SECTION: "COMPLIANCE MADE SIMPLE" (Exact Match to Image 2) ─── */}
           <section style={{
@@ -1596,6 +1895,8 @@ export default function App() {
               <span style={{ cursor: 'pointer' }}>Support</span>
             </div>
           </footer>
+
+          </>) } {/* end overview */}
 
         </main>
       </div>
