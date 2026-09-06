@@ -13,7 +13,13 @@ import csv
 import io
 import json
 from typing import Any, Dict, List, Tuple
-import openpyxl
+# openpyxl is imported lazily inside parse_file_content to avoid Vercel cold-start crashes
+try:
+    import openpyxl
+    OPENPYXL_AVAILABLE = True
+except ImportError:
+    openpyxl = None
+    OPENPYXL_AVAILABLE = False
 
 from .gst_reconciliation import InvoiceRecord, validate_gstin_checksum
 
@@ -128,6 +134,8 @@ def parse_file_content(content_bytes: bytes, filename: str) -> Tuple[List[Invoic
         rows = [dict(r) for r in reader]
 
     elif fname.endswith(".xlsx") or fname.endswith(".xls"):
+        if not OPENPYXL_AVAILABLE:
+            raise ImportError("openpyxl is not available. XLSX parsing is unavailable in this environment. Please upload a .csv or .json file.")
         wb = openpyxl.load_workbook(io.BytesIO(content_bytes), data_only=True)
         sheet = wb.active
         all_rows = list(sheet.iter_rows(values_only=True))
