@@ -1,6 +1,5 @@
 {
   "rewrites": [
-    { "source": "/api/:path*", "destination": "/api" },
-    { "source": "/((?!assets|crediflow-).*)*", "destination": "/index.html" }
+    { "source": "/api/(.*)", "destination": "/api/index.py" }
   ]
 }
