@@ -7,3 +7,6 @@ if REPO_ROOT not in sys.path:
     sys.path.insert(0, REPO_ROOT)
 
 from backend.app.main import app
+
+# Export for both ASGI and WSGI Vercel runtimes
+handler = app
