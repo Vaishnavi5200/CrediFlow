@@ -21,6 +21,7 @@ export default function App() {
   const [searchQuery, setSearchQuery] = useState('');
   const [loading, setLoading] = useState(false);
   const [notification, setNotification] = useState(null);
+  const [apiError, setApiError] = useState(null);
 
   // Live Clock
   const [currentTime, setCurrentTime] = useState(new Date());
@@ -74,6 +75,9 @@ export default function App() {
   const [reviewModalItem, setReviewModalItem] = useState(null);
   const [customEditMsg, setCustomEditMsg] = useState('');
   const [isEditingMessage, setIsEditingMessage] = useState(false);
+  const [nudgeLanguage, setNudgeLanguage] = useState('en');
+  const [explanationData, setExplanationData] = useState(null);
+  const [loadingExplanation, setLoadingExplanation] = useState(false);
 
   // Upload State
   const [prFile, setPrFile] = useState({
@@ -109,6 +113,37 @@ export default function App() {
     setTimeout(() => setNotification(null), 3500);
   };
 
+  // Fetch explanation and bilingual nudge whenever modal item is set
+  useEffect(() => {
+    if (reviewModalItem?.invoice_number) {
+      loadExplanation(reviewModalItem.invoice_number);
+    } else {
+      setExplanationData(null);
+      setIsEditingMessage(false);
+      setCustomEditMsg('');
+    }
+  }, [reviewModalItem?.invoice_number]);
+
+  const loadExplanation = async (invNumber) => {
+    try {
+      setLoadingExplanation(true);
+      const res = await fetch(`${API_BASE}/discrepancy/explain`, {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ invoice_number: invNumber })
+      });
+      if (res.ok) {
+        const data = await res.json();
+        setExplanationData(data);
+        setCustomEditMsg(data.vendor_nudge_english || '');
+      }
+    } catch (err) {
+      console.error('Failed to load AI explanation:', err);
+    } finally {
+      setLoadingExplanation(false);
+    }
+  };
+
   // Initial Load
   useEffect(() => {
     loadInitialData();
@@ -117,6 +152,8 @@ export default function App() {
   const loadInitialData = async () => {
     try {
       setLoading(true);
+      setApiError(null);
+
       // 1. Fetch Demo Data
       const demoRes = await fetch(`${API_BASE}/demo-data`);
       if (demoRes.ok) {
@@ -143,7 +180,7 @@ export default function App() {
       if (gateRes.ok) {
         const gateData = await gateRes.json();
         setGateQueue(gateData.queue || []);
-        setStats(prev => ({ ...prev, pendingHumanGate: gateData.pending_count || 2 }));
+        setStats(prev => ({ ...prev, pendingHumanGate: gateData.pending_count || 0 }));
       }
 
       // 4. Benchmarks
@@ -169,6 +206,59 @@ export default function App() {
 
     } catch (err) {
       console.error('Failed to load initial data:', err);
+      setApiError(err.message || 'Failed to connect to reconciliation engine backend');
+      showNotification('Error loading initial data: ' + err.message, 'error');
+    } finally {
+      setLoading(false);
+    }
+  };
+
+  // Direct Deterministic Reconciliation Trigger
+  const handleRunReconciliation = async () => {
+    try {
+      setLoading(true);
+      setApiError(null);
+      let res;
+      if (prFile.fileObj && g2bFile.fileObj) {
+        const formData = new FormData();
+        formData.append('pr_file', prFile.fileObj);
+        formData.append('g2b_file', g2bFile.fileObj);
+        res = await fetch(`${API_BASE}/upload-and-reconcile`, {
+          method: 'POST',
+          body: formData
+        });
+      } else {
+        res = await fetch(`${API_BASE}/reconcile`, { method: 'POST' });
+      }
+
+      if (!res.ok) {
+        const errData = await res.json().catch(() => ({ detail: 'Reconciliation failed' }));
+        throw new Error(errData.detail || `Server returned ${res.status}`);
+      }
+
+      const data = await res.json();
+      setDiscrepancies(data.discrepancies || []);
+      setStats(prev => ({
+        ...prev,
+        totalInvoices: data.purchase_register_count || prev.totalInvoices,
+        matched: data.matched_count || 0,
+        discrepancies: data.discrepancies_count || 0,
+        exposureRisk: data.total_itc_exposure_rupees || 0,
+      }));
+
+      // Refresh human gate queue
+      const gateRes = await fetch(`${API_BASE}/human-gate/queue`);
+      if (gateRes.ok) {
+        const gateData = await gateRes.json();
+        setGateQueue(gateData.queue || []);
+        setStats(prev => ({ ...prev, pendingHumanGate: gateData.pending_count || 0 }));
+      }
+
+      showNotification(`Reconciliation complete: ${data.matched_count} matched, ${data.discrepancies_count} discrepancies (₹${(data.total_itc_exposure_rupees || 0).toLocaleString()} at risk)`, 'success');
+    } catch (err) {
+      console.error('Reconciliation error:', err);
+      setApiError(err.message || 'Failed to execute reconciliation');
+      showNotification(`Reconciliation error: ${err.message}`, 'error');
     } finally {
       setLoading(false);
     }
@@ -236,7 +326,7 @@ export default function App() {
       setCurrentStep(2);
       await new Promise(r => setTimeout(r, 400));
 
-      // Step 3: AI Investigation (RocketRide Agent A + B)
+      // Step 3: AI Statutory Explanation & Investigation
       setCurrentStep(3);
       const auditRes = await fetch(`${API_BASE}/audit`, { method: 'POST' });
       if (auditRes.ok) {
@@ -264,7 +354,7 @@ export default function App() {
 
       // Step 6: Verify
       setCurrentStep(6);
-      showNotification('RocketRide Multi-Agent Audit Complete! 100% Deterministic Verification.', 'success');
+      showNotification('Reconciliation & Statutory Audit Complete! 100% Deterministic Verification.', 'success');
 
     } catch (err) {
       showNotification('Audit failed: ' + err.message, 'error');
@@ -344,40 +434,103 @@ export default function App() {
     }
   };
 
-  // Simulate Resolution & Re-Audit (Closed Loop)
-  const handleSimulateAmendment = async (invoiceNumber) => {
+  // Step 7: Vendor Amendment Simulation & Re-Reconciliation
+  const handleStageAmendmentOnly = async (invoiceNumber, amendmentType = 'CORRECT_AND_MATCH') => {
     try {
       setLoading(true);
-      // 1. Simulate vendor filing
-      const res1 = await fetch(`${API_BASE}/simulate/vendor-amend`, {
+      const res = await fetch(`${API_BASE}/amendment/simulate`, {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ invoice_number: invoiceNumber, amendment_type: amendmentType })
+      });
+      const data = await res.json();
+      if (res.ok) {
+        setSimulatedArn(data.filing_arn || 'ARN-2026-AA270420-00987');
+        setActionStatus(prev => ({ ...prev, vendorCorrectionReceived: true }));
+        showNotification(`Amendment staged under ${data.filing_arn}. Status: PENDING_VERIFICATION`, 'info');
+        loadInitialData();
+      } else {
+        showNotification(data.detail || 'Failed to simulate amendment', 'error');
+      }
+    } catch (err) {
+      showNotification('Simulation error: ' + err.message, 'error');
+    } finally {
+      setLoading(false);
+    }
+  };
+
+  const handleVerifyAmendmentOnly = async (invoiceNumber) => {
+    try {
+      setLoading(true);
+      const res = await fetch(`${API_BASE}/amendment/verify`, {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
         body: JSON.stringify({ invoice_number: invoiceNumber })
       });
+      const data = await res.json();
+      if (res.ok) {
+        setStats(prev => ({
+          ...prev,
+          exposureRisk: data.current_blocked_itc || 0,
+          exposureRecovered: (prev.exposureRecovered || 0) + (data.itc_recovered_rupees || 0),
+          discrepancies: data.remaining_discrepancies_count || 0
+        }));
+        setActionStatus(prev => ({ ...prev, reconciliationRerun: true }));
+        if (data.verification_success) {
+          confetti({ particleCount: 100, spread: 70, origin: { y: 0.6 } });
+          showNotification(`Verification Successful! ₹${data.itc_recovered_rupees?.toLocaleString()} recovered. Status: VERIFIED`, 'success');
+        } else {
+          showNotification(`Verification Discrepancy: ${data.audit_note}`, 'error');
+        }
+        loadInitialData();
+      } else {
+        showNotification(data.detail || 'Verification error', 'error');
+      }
+    } catch (err) {
+      showNotification('Verification error: ' + err.message, 'error');
+    } finally {
+      setLoading(false);
+    }
+  };
+
+  // End-to-end Closed Loop Simulation
+  const handleSimulateAmendment = async (invoiceNumber) => {
+    try {
+      setLoading(true);
+      // 1. Simulate vendor filing (Pending Verification)
+      const res1 = await fetch(`${API_BASE}/amendment/simulate`, {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ invoice_number: invoiceNumber, amendment_type: 'CORRECT_AND_MATCH' })
+      });
       const data1 = await res1.json();
-      setSimulatedArn(data1.resolution?.filing_arn || 'ARN-2026-AA270420-00987');
+      setSimulatedArn(data1.filing_arn || 'ARN-2026-AA270420-00987');
       setActionStatus(prev => ({ ...prev, vendorCorrectionReceived: true }));
 
-      // 2. Re-audit verification
-      const res2 = await fetch(`${API_BASE}/simulate/re-audit?invoice_number=${invoiceNumber}`, { method: 'POST' });
+      // 2. Re-run EXACT SAME engine to verify
+      const res2 = await fetch(`${API_BASE}/amendment/verify`, {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ invoice_number: invoiceNumber })
+      });
       const data2 = await res2.json();
 
       setStats(prev => ({
         ...prev,
-        exposureRisk: data2.current_exposure_rupees || 0,
-        exposureRecovered: data2.itc_recovered_rupees || 42500,
-        discrepancies: data2.remaining_discrepancies_count || 4
+        exposureRisk: data2.current_blocked_itc || 0,
+        exposureRecovered: (prev.exposureRecovered || 0) + (data2.itc_recovered_rupees || 0),
+        discrepancies: data2.remaining_discrepancies_count || 0
       }));
 
       setActionStatus(prev => ({ ...prev, reconciliationRerun: true }));
 
-      confetti({
-        particleCount: 100,
-        spread: 70,
-        origin: { y: 0.6 }
-      });
-
-      showNotification(`Closed-Loop Verified! ₹${(data2.itc_recovered_rupees || 42500).toLocaleString()} ITC recovered.`, 'success');
+      if (data2.verification_success) {
+        confetti({ particleCount: 100, spread: 70, origin: { y: 0.6 } });
+        showNotification(`Closed-Loop Verified! ₹${(data2.itc_recovered_rupees || 0).toLocaleString()} ITC recovered. Status: VERIFIED`, 'success');
+      } else {
+        showNotification(`Engine rejected verification: ${data2.audit_note}`, 'error');
+      }
+      loadInitialData();
     } catch (err) {
       showNotification('Simulation error: ' + err.message, 'error');
     } finally {
@@ -796,6 +949,44 @@ export default function App() {
         {/* ─── PAGE CONTENT CONTAINER ─── */}
         <main style={{ padding: '28px 32px 60px', maxWidth: 1440, margin: '0 auto', width: '100%' }}>
 
+          {/* API Error Alert Banner */}
+          {apiError && (
+            <div style={{
+              background: '#fef2f2',
+              border: '1px solid #fecaca',
+              borderRadius: 12,
+              padding: '14px 20px',
+              marginBottom: 20,
+              display: 'flex',
+              alignItems: 'center',
+              justifyContent: 'space-between',
+              color: '#991b1b',
+              fontSize: 13.5
+            }}>
+              <div style={{ display: 'flex', alignItems: 'center', gap: 10 }}>
+                <AlertCircle size={18} color="#ef4444" />
+                <div>
+                  <strong>Reconciliation Backend Error:</strong> {apiError}
+                </div>
+              </div>
+              <button
+                onClick={loadInitialData}
+                style={{
+                  background: '#ef4444',
+                  color: '#ffffff',
+                  border: 'none',
+                  borderRadius: 8,
+                  padding: '6px 14px',
+                  fontSize: 12,
+                  fontWeight: 600,
+                  cursor: 'pointer'
+                }}
+              >
+                Retry
+              </button>
+            </div>
+          )}
+
           {/* ── AUDITS VIEW ── */}
           {activeNav === 'audits' && (
             <section>
@@ -980,16 +1171,21 @@ export default function App() {
                 </div>
                 <div style={{ background: '#fff', border: '1px solid #e5eae7', borderRadius: 18, padding: '24px', boxShadow: '0 1px 3px rgba(0,0,0,0.03)' }}>
                   <h3 style={{ fontSize: 15, fontWeight: 700, color: '#0a1e19', marginBottom: 8 }}>Simulate End-to-End Resolution</h3>
-                  <div style={{ fontSize: 12, color: '#64748b', marginBottom: 20, lineHeight: 1.5 }}>Use this panel to test the full closed-loop: dispatch notice → vendor files amendment → re-audit confirms recovery.</div>
+                  <div style={{ fontSize: 12, color: '#64748b', marginBottom: 20, lineHeight: 1.5 }}>
+                    Test the complete closed-loop: dispatch statutory notice → vendor files amendment in GSTR-1 → deterministic reconciliation engine re-runs to verify recovery.
+                  </div>
                   <div style={{ display: 'flex', flexDirection: 'column', gap: 12 }}>
-                    <button onClick={() => handleDispatchNudge('INV-2026-001')} style={{ background: '#f8fafc', border: '1px solid #e2e8f0', color: '#0f172a', borderRadius: 10, padding: '12px 16px', fontSize: 13, fontWeight: 600, cursor: 'pointer', display: 'flex', alignItems: 'center', gap: 10 }}>
-                      <Send size={15} color="#0284c7" /> 1. Dispatch PDF + WhatsApp Nudge
+                    <button onClick={() => handleDispatchNudge(discrepancies[0]?.invoice_number || 'INV-2024-001')} style={{ background: '#f8fafc', border: '1px solid #e2e8f0', color: '#0f172a', borderRadius: 10, padding: '12px 16px', fontSize: 13, fontWeight: 600, cursor: 'pointer', display: 'flex', alignItems: 'center', gap: 10 }}>
+                      <Send size={15} color="#0284c7" /> 1. Dispatch Rule 60 PDF + Nudge
                     </button>
-                    <button onClick={() => handleSimulateAmendment('INV-2026-001')} style={{ background: '#f8fafc', border: '1px solid #e2e8f0', color: '#0f172a', borderRadius: 10, padding: '12px 16px', fontSize: 13, fontWeight: 600, cursor: 'pointer', display: 'flex', alignItems: 'center', gap: 10 }}>
-                      <CheckCircle size={15} color="#059669" /> 2. Simulate Vendor Amendment + Re-Audit
+                    <button onClick={() => handleStageAmendmentOnly(discrepancies[0]?.invoice_number || 'INV-2024-001')} style={{ background: '#f8fafc', border: '1px solid #e2e8f0', color: '#0f172a', borderRadius: 10, padding: '12px 16px', fontSize: 13, fontWeight: 600, cursor: 'pointer', display: 'flex', alignItems: 'center', gap: 10 }}>
+                      <Clock size={15} color="#f59e0b" /> 2. Simulate Vendor Amendment (Pending Verification)
                     </button>
-                    <button onClick={handleRunFullAudit} style={{ background: '#0f2e26', color: '#fff', border: 'none', borderRadius: 10, padding: '12px 16px', fontSize: 13, fontWeight: 700, cursor: 'pointer', display: 'flex', alignItems: 'center', gap: 10 }}>
-                      <RefreshCw size={15} /> 3. Re-Run Full Reconciliation
+                    <button onClick={() => handleVerifyAmendmentOnly(discrepancies[0]?.invoice_number || 'INV-2024-001')} style={{ background: '#f8fafc', border: '1px solid #e2e8f0', color: '#0f172a', borderRadius: 10, padding: '12px 16px', fontSize: 13, fontWeight: 600, cursor: 'pointer', display: 'flex', alignItems: 'center', gap: 10 }}>
+                      <CheckCircle size={15} color="#059669" /> 3. Re-Run Reconciliation Engine & Verify
+                    </button>
+                    <button onClick={() => handleSimulateAmendment(discrepancies[0]?.invoice_number || 'INV-2024-001')} style={{ background: '#0f2e26', color: '#fff', border: 'none', borderRadius: 10, padding: '12px 16px', fontSize: 13, fontWeight: 700, cursor: 'pointer', display: 'flex', alignItems: 'center', gap: 10, marginTop: 4 }}>
+                      <RefreshCw size={15} /> Run Complete Auto-Verification Flow
                     </button>
                   </div>
                 </div>
@@ -1052,10 +1248,10 @@ export default function App() {
             <section>
               <div style={{ marginBottom: 20 }}>
                 <h2 style={{ fontSize: 22, fontWeight: 800, color: '#0a1e19', margin: 0 }}>Settings & Configuration</h2>
-                <div style={{ fontSize: 13, color: '#64748b', marginTop: 4 }}>System thresholds, RocketRide configuration, and compliance settings</div>
+                <div style={{ fontSize: 13, color: '#64748b', marginTop: 4 }}>System thresholds, engine configuration, and compliance settings</div>
               </div>
               <div style={{ display: 'grid', gridTemplateColumns: '1fr 1fr', gap: 20 }}>
-                {[{group:'Compliance Thresholds', items:[{label:'High Value Threshold (INR)',val:'₹50,000'},{label:'Human Gate Confidence Threshold',val:'85%'},{label:'Rule Version',val:'Rule 60 CGST (2026)'}]},{group:'RocketRide Configuration', items:[{label:'Execution Engine',val:'STATUTORY_FALLBACK'},{label:'Webhook URL',val:'Not configured'},{label:'SDK Status',val:'SDK not installed'}]},{group:'Database',items:[{label:'DB Path',val:dbSummary?.database_path||'/tmp/crediflow.db'},{label:'DB Size',val:`${Math.round((dbSummary?.database_size_bytes||0)/1024)} KB`},{label:'Tables',val:'benchmark_runs, audit_ledger, human_decisions, notice_dispatches'}]},{group:'Buyer Profile',items:[{label:'GSTIN',val:'27AAACB0987A1Z1'},{label:'Entity',val:'CrediFlow Enterprise Ltd'},{label:'User',val:'Vaishnavi Dwivedi · MSME Finance Team'}]}].map((group,gi) => (
+                {[{group:'Compliance Thresholds', items:[{label:'Tolerance Threshold',val:'≤ ₹2.00 (Amount-Tolerant Match)'},{label:'High Value Threshold (INR)',val:'₹50,000'},{label:'Rule Version',val:'Rule 60 CGST (2026)'}]},{group:'Engine Configuration', items:[{label:'Execution Engine',val:'DETERMINISTIC_STATUTORY'},{label:'Source of Truth',val:'GSTReconciliationEngine'},{label:'Bilingual Support',val:'English & Hindi'}]},{group:'Database',items:[{label:'DB Path',val:dbSummary?.database_path||'/tmp/crediflow.db'},{label:'DB Size',val:`${Math.round((dbSummary?.database_size_bytes||0)/1024)} KB`},{label:'Tables',val:'benchmark_runs, audit_ledger, human_decisions, notice_dispatches'}]},{group:'Buyer Profile',items:[{label:'GSTIN',val:'27AAACB0987A1Z1'},{label:'Entity',val:'CrediFlow Enterprise Ltd'},{label:'User',val:'Vaishnavi Dwivedi · MSME Finance Team'}]}].map((group,gi) => (
                   <div key={gi} style={{ background: '#fff', border: '1px solid #e5eae7', borderRadius: 14, padding: '20px', boxShadow: '0 1px 3px rgba(0,0,0,0.03)' }}>
                     <div style={{ fontSize: 13, fontWeight: 700, color: '#059669', textTransform: 'uppercase', letterSpacing: '0.06em', marginBottom: 14 }}>{group.group}</div>
                     <div style={{ display: 'flex', flexDirection: 'column', gap: 10 }}>
@@ -1261,7 +1457,7 @@ export default function App() {
                 alignItems: 'center',
                 gap: 6
               }}>
-                <span>🚀 RocketRide • Live</span>
+                <span>⚡ CrediFlow Engine • Active</span>
               </div>
             </div>
 
@@ -1275,7 +1471,7 @@ export default function App() {
               {[
                 { num: 1, label: 'Upload', desc: 'Purchase Register & GSTR-2B', icon: Upload },
                 { num: 2, label: 'Reconcile', desc: 'Match & detect mismatches', icon: Database },
-                { num: 3, label: 'AI Investigation', desc: 'Agent A + Agent B (Why it happened?)', icon: Cpu },
+                { num: 3, label: 'AI Explanation', desc: 'Statutory root cause & nudges', icon: Cpu },
                 { num: 4, label: 'Human Review', desc: 'You approve / edit', icon: Users },
                 { num: 5, label: 'Resolve', desc: 'Nudge vendors / take action', icon: Send },
                 { num: 6, label: 'Verify', desc: 'Re-run & confirm recovery', icon: ShieldCheck },
@@ -1444,7 +1640,7 @@ export default function App() {
 
               {/* Action Trigger */}
               <button
-                onClick={handleRunFullAudit}
+                onClick={handleRunReconciliation}
                 disabled={loading}
                 style={{
                   marginTop: 16,
@@ -1455,14 +1651,15 @@ export default function App() {
                   padding: '10px 16px',
                   fontSize: 13,
                   fontWeight: 700,
-                  cursor: 'pointer',
+                  cursor: loading ? 'not-allowed' : 'pointer',
+                  opacity: loading ? 0.7 : 1,
                   display: 'flex',
                   alignItems: 'center',
                   justifyContent: 'center',
                   gap: 8
                 }}
               >
-                <Play size={14} /> Execute Deterministic Reconciliation
+                <Play size={14} /> {loading ? 'Running Reconciliation...' : 'Execute Deterministic Reconciliation'}
               </button>
             </div>
 
@@ -1489,7 +1686,7 @@ export default function App() {
                   </span>
                 </div>
                 <div style={{ fontSize: 12, color: '#64748b', marginBottom: 16 }}>
-                  demo_dataset.csv · 6 Sep 2026, 6:14 PM
+                  demo_dataset.csv · Rule 60 Zero-Mismatch Engine
                 </div>
 
                 {/* 4 Summary Cards */}
@@ -1501,12 +1698,16 @@ export default function App() {
 
                   <div style={{ background: '#f8fafc', border: '1px solid #e2e8f0', borderRadius: 12, padding: 14 }}>
                     <div style={{ fontSize: 24, fontWeight: 800, color: '#059669' }}>{stats.matched}</div>
-                    <div style={{ fontSize: 11.5, color: '#64748b', marginTop: 2 }}>Matched (88.9%)</div>
+                    <div style={{ fontSize: 11.5, color: '#64748b', marginTop: 2 }}>
+                      Matched ({stats.totalInvoices > 0 ? ((stats.matched / stats.totalInvoices) * 100).toFixed(1) : 0}%)
+                    </div>
                   </div>
 
                   <div style={{ background: '#f8fafc', border: '1px solid #e2e8f0', borderRadius: 12, padding: 14 }}>
                     <div style={{ fontSize: 24, fontWeight: 800, color: '#ef4444' }}>{stats.discrepancies}</div>
-                    <div style={{ fontSize: 11.5, color: '#64748b', marginTop: 2 }}>Mismatched (11.1%)</div>
+                    <div style={{ fontSize: 11.5, color: '#64748b', marginTop: 2 }}>
+                      Mismatched ({stats.totalInvoices > 0 ? ((stats.discrepancies / stats.totalInvoices) * 100).toFixed(1) : 0}%)
+                    </div>
                   </div>
 
                   <div style={{ background: '#fef2f2', border: '1px solid #fecaca', borderRadius: 12, padding: 14 }}>
@@ -1552,9 +1753,9 @@ export default function App() {
 
                 <div>
                   <div style={{ fontSize: 13, fontWeight: 700, color: '#059669', display: 'flex', alignItems: 'center', justifyContent: 'center', gap: 4 }}>
-                    <CheckCircle size={12} /> 496 / 500
+                    <CheckCircle size={12} /> {stats.matched} / {stats.totalInvoices}
                   </div>
-                  <div style={{ fontSize: 10, color: '#ea580c', fontWeight: 600, marginTop: 2 }}>4 Escalated</div>
+                  <div style={{ fontSize: 10, color: '#ea580c', fontWeight: 600, marginTop: 2 }}>{stats.pendingHumanGate} Escalated</div>
                 </div>
               </div>
             </div>
@@ -1577,98 +1778,131 @@ export default function App() {
                 </div>
 
                 {/* Donut Gauge & Legend */}
-                <div style={{ display: 'flex', alignItems: 'center', gap: 16, marginBottom: 16 }}>
-                  {/* SVG Donut */}
-                  <div style={{ position: 'relative', width: 84, height: 84 }}>
-                    <svg viewBox="0 0 36 36" style={{ width: '100%', height: '100%', transform: 'rotate(-90deg)' }}>
-                      <path
-                        d="M18 2.0845 a 15.9155 15.9155 0 0 1 0 31.831 a 15.9155 15.9155 0 0 1 0 -31.831"
-                        fill="none"
-                        stroke="#e2e8f0"
-                        strokeWidth="3.8"
-                      />
-                      <path
-                        d="M18 2.0845 a 15.9155 15.9155 0 0 1 0 31.831 a 15.9155 15.9155 0 0 1 0 -31.831"
-                        fill="none"
-                        stroke="#059669"
-                        strokeWidth="3.8"
-                        strokeDasharray="88.9, 100"
-                      />
-                    </svg>
-                    <div style={{
-                      position: 'absolute', top: 0, left: 0, right: 0, bottom: 0,
-                      display: 'flex', alignItems: 'center', justifyContent: 'center',
-                      fontSize: 14, fontWeight: 800, color: '#0f172a'
-                    }}>
-                      88.9%
-                    </div>
-                  </div>
+                {(() => {
+                  const matchRatePct = stats.totalInvoices > 0 ? ((stats.matched / stats.totalInvoices) * 100).toFixed(1) : '0.0';
+                  const missingCount = discrepancies.filter(d => d.mismatch_type === 'MISSING_IN_2B').length;
+                  const taxHeadCount = discrepancies.filter(d => d.mismatch_type === 'TAX_HEAD_MISMATCH').length;
+                  const amountCount = discrepancies.filter(d => d.mismatch_type === 'AMOUNT_MISMATCH').length;
+                  const nearMatchCount = discrepancies.filter(d => d.mismatch_type === 'NEAR_MATCH_INVOICE').length;
+                  const otherCount = discrepancies.length - missingCount - taxHeadCount - amountCount - nearMatchCount;
 
-                  {/* Legend */}
-                  <div style={{ display: 'flex', flexDirection: 'column', gap: 4, fontSize: 11.5 }}>
-                    <div style={{ display: 'flex', alignItems: 'center', gap: 6 }}>
-                      <span style={{ width: 7, height: 7, borderRadius: '50%', background: '#059669' }} />
-                      <span style={{ color: '#475569' }}>Matched</span>
-                      <span style={{ fontWeight: 700, marginLeft: 'auto' }}>445</span>
-                    </div>
-                    <div style={{ display: 'flex', alignItems: 'center', gap: 6 }}>
-                      <span style={{ width: 7, height: 7, borderRadius: '50%', background: '#ef4444' }} />
-                      <span style={{ color: '#475569' }}>Mismatched</span>
-                      <span style={{ fontWeight: 700, marginLeft: 'auto' }}>50</span>
-                    </div>
-                    <div style={{ display: 'flex', alignItems: 'center', gap: 6 }}>
-                      <span style={{ width: 7, height: 7, borderRadius: '50%', background: '#0284c7' }} />
-                      <span style={{ color: '#475569' }}>Not in GSTR-2B</span>
-                      <span style={{ fontWeight: 700, marginLeft: 'auto' }}>3</span>
-                    </div>
-                    <div style={{ display: 'flex', alignItems: 'center', gap: 6 }}>
-                      <span style={{ width: 7, height: 7, borderRadius: '50%', background: '#f59e0b' }} />
-                      <span style={{ color: '#475569' }}>Duplicate</span>
-                      <span style={{ fontWeight: 700, marginLeft: 'auto' }}>2</span>
-                    </div>
-                  </div>
-                </div>
+                  return (
+                    <>
+                      <div style={{ display: 'flex', alignItems: 'center', gap: 16, marginBottom: 16 }}>
+                        {/* SVG Donut */}
+                        <div style={{ position: 'relative', width: 84, height: 84 }}>
+                          <svg viewBox="0 0 36 36" style={{ width: '100%', height: '100%', transform: 'rotate(-90deg)' }}>
+                            <path
+                              d="M18 2.0845 a 15.9155 15.9155 0 0 1 0 31.831 a 15.9155 15.9155 0 0 1 0 -31.831"
+                              fill="none"
+                              stroke="#e2e8f0"
+                              strokeWidth="3.8"
+                            />
+                            <path
+                              d="M18 2.0845 a 15.9155 15.9155 0 0 1 0 31.831 a 15.9155 15.9155 0 0 1 0 -31.831"
+                              fill="none"
+                              stroke="#059669"
+                              strokeWidth="3.8"
+                              strokeDasharray={`${matchRatePct}, 100`}
+                            />
+                          </svg>
+                          <div style={{
+                            position: 'absolute', top: 0, left: 0, right: 0, bottom: 0,
+                            display: 'flex', alignItems: 'center', justifyContent: 'center',
+                            fontSize: 14, fontWeight: 800, color: '#0f172a'
+                          }}>
+                            {matchRatePct}%
+                          </div>
+                        </div>
 
-                {/* ITC Summary */}
-                <div style={{ borderTop: '1px solid #f1f5f9', paddingTop: 12, marginBottom: 12 }}>
-                  <div style={{ fontSize: 11.5, color: '#64748b' }}>ITC Summary</div>
-                  <div style={{ fontSize: 22, fontWeight: 800, color: '#059669', marginTop: 2 }}>
-                    ₹52,300
-                  </div>
-                  <div style={{ fontSize: 11, color: '#059669', fontWeight: 600 }}>Potentially Recoverable</div>
-                </div>
+                        {/* Legend */}
+                        <div style={{ display: 'flex', flexDirection: 'column', gap: 4, fontSize: 11.5, flex: 1 }}>
+                          <div style={{ display: 'flex', alignItems: 'center', gap: 6 }}>
+                            <span style={{ width: 7, height: 7, borderRadius: '50%', background: '#059669' }} />
+                            <span style={{ color: '#475569' }}>Matched</span>
+                            <span style={{ fontWeight: 700, marginLeft: 'auto' }}>{stats.matched}</span>
+                          </div>
+                          <div style={{ display: 'flex', alignItems: 'center', gap: 6 }}>
+                            <span style={{ width: 7, height: 7, borderRadius: '50%', background: '#ef4444' }} />
+                            <span style={{ color: '#475569' }}>Mismatched</span>
+                            <span style={{ fontWeight: 700, marginLeft: 'auto' }}>{stats.discrepancies}</span>
+                          </div>
+                          <div style={{ display: 'flex', alignItems: 'center', gap: 6 }}>
+                            <span style={{ width: 7, height: 7, borderRadius: '50%', background: '#0284c7' }} />
+                            <span style={{ color: '#475569' }}>Missing in 2B</span>
+                            <span style={{ fontWeight: 700, marginLeft: 'auto' }}>{missingCount}</span>
+                          </div>
+                          <div style={{ display: 'flex', alignItems: 'center', gap: 6 }}>
+                            <span style={{ width: 7, height: 7, borderRadius: '50%', background: '#f59e0b' }} />
+                            <span style={{ color: '#475569' }}>Other Variance</span>
+                            <span style={{ fontWeight: 700, marginLeft: 'auto' }}>{taxHeadCount + amountCount + nearMatchCount + otherCount}</span>
+                          </div>
+                        </div>
+                      </div>
 
-                {/* Risk Breakdown Mini Bars */}
-                <div style={{ borderTop: '1px solid #f1f5f9', paddingTop: 10 }}>
-                  <div style={{ fontSize: 11, fontWeight: 700, color: '#0f172a', marginBottom: 6 }}>Risk Breakdown</div>
-                  <div style={{ display: 'flex', flexDirection: 'column', gap: 4, fontSize: 11 }}>
-                    <div style={{ display: 'flex', justifyContent: 'space-between', color: '#475569' }}>
-                      <span>GSTIN mismatch</span> <span style={{ fontWeight: 700 }}>2</span>
-                    </div>
-                    <div style={{ display: 'flex', justifyContent: 'space-between', color: '#475569' }}>
-                      <span>Invoice not in GSTR-2B</span> <span style={{ fontWeight: 700 }}>1</span>
-                    </div>
-                    <div style={{ display: 'flex', justifyContent: 'space-between', color: '#475569' }}>
-                      <span>Amount mismatch</span> <span style={{ fontWeight: 700 }}>1</span>
-                    </div>
-                    <div style={{ display: 'flex', justifyContent: 'space-between', color: '#475569' }}>
-                      <span>Duplicate invoice</span> <span style={{ fontWeight: 700 }}>1</span>
-                    </div>
-                  </div>
-                </div>
+                      {/* ITC Summary */}
+                      <div style={{ borderTop: '1px solid #f1f5f9', paddingTop: 12, marginBottom: 12 }}>
+                        <div style={{ fontSize: 11.5, color: '#64748b' }}>ITC Summary</div>
+                        <div style={{ fontSize: 22, fontWeight: 800, color: '#059669', marginTop: 2 }}>
+                          ₹{stats.exposureRisk.toLocaleString()}
+                        </div>
+                        <div style={{ fontSize: 11, color: '#059669', fontWeight: 600 }}>Unresolved Exposure Risk</div>
+                      </div>
+
+                      {/* Risk Breakdown Mini Bars */}
+                      <div style={{ borderTop: '1px solid #f1f5f9', paddingTop: 10 }}>
+                        <div style={{ fontSize: 11, fontWeight: 700, color: '#0f172a', marginBottom: 6 }}>Risk Breakdown</div>
+                        <div style={{ display: 'flex', flexDirection: 'column', gap: 4, fontSize: 11 }}>
+                          {discrepancies.length === 0 ? (
+                            <div style={{ color: '#059669', fontWeight: 600 }}>Zero active discrepancies</div>
+                          ) : (
+                            <>
+                              {missingCount > 0 && (
+                                <div style={{ display: 'flex', justifyContent: 'space-between', color: '#475569' }}>
+                                  <span>Missing in GSTR-2B</span> <span style={{ fontWeight: 700 }}>{missingCount}</span>
+                                </div>
+                              )}
+                              {taxHeadCount > 0 && (
+                                <div style={{ display: 'flex', justifyContent: 'space-between', color: '#475569' }}>
+                                  <span>Tax-Head Mismatch</span> <span style={{ fontWeight: 700 }}>{taxHeadCount}</span>
+                                </div>
+                              )}
+                              {amountCount > 0 && (
+                                <div style={{ display: 'flex', justifyContent: 'space-between', color: '#475569' }}>
+                                  <span>Amount Mismatch</span> <span style={{ fontWeight: 700 }}>{amountCount}</span>
+                                </div>
+                              )}
+                              {nearMatchCount > 0 && (
+                                <div style={{ display: 'flex', justifyContent: 'space-between', color: '#475569' }}>
+                                  <span>Near-Match Invoice</span> <span style={{ fontWeight: 700 }}>{nearMatchCount}</span>
+                                </div>
+                              )}
+                              {otherCount > 0 && (
+                                <div style={{ display: 'flex', justifyContent: 'space-between', color: '#475569' }}>
+                                  <span>Other Discrepancies</span> <span style={{ fontWeight: 700 }}>{otherCount}</span>
+                                </div>
+                              )}
+                            </>
+                          )}
+                        </div>
+                      </div>
+                    </>
+                  );
+                })()}
               </div>
 
               {/* Quick Actions Row */}
               <div style={{ borderTop: '1px solid #f1f5f9', paddingTop: 12, display: 'grid', gridTemplateColumns: '1fr 1fr', gap: 6 }}>
                 <button
-                  onClick={handleRunFullAudit}
+                  onClick={handleRunReconciliation}
+                  disabled={loading}
                   style={{
                     background: '#f8fafc', border: '1px solid #e2e8f0', borderRadius: 8,
                     padding: '6px 8px', fontSize: 11, fontWeight: 600, color: '#0f172a',
                     display: 'flex', alignItems: 'center', gap: 4, cursor: 'pointer'
                   }}
                 >
-                  <Play size={11} color="#059669" /> Run New Audit
+                  <Play size={11} color="#059669" /> Reconcile
                 </button>
                 <button
                   onClick={() => setActiveNav('human_review')}
@@ -1678,7 +1912,7 @@ export default function App() {
                     display: 'flex', alignItems: 'center', gap: 4, cursor: 'pointer'
                   }}
                 >
-                  <ShieldAlert size={11} color="#ea580c" /> Human Review (2)
+                  <ShieldAlert size={11} color="#ea580c" /> Human Review ({gateQueue.length})
                 </button>
                 <a
                   href={`${API_BASE}/nudge/pdf/INV-0881`}
@@ -1690,7 +1924,7 @@ export default function App() {
                     display: 'flex', alignItems: 'center', gap: 4, textDecoration: 'none'
                   }}
                 >
-                  <Download size={11} color="#0284c7" /> Generate Report
+                  <Download size={11} color="#0284c7" /> Sample PDF
                 </a>
                 <button
                   onClick={() => setActiveNav('vendors')}
@@ -1700,7 +1934,7 @@ export default function App() {
                     display: 'flex', alignItems: 'center', gap: 4, cursor: 'pointer'
                   }}
                 >
-                  <Building size={11} color="#64748b" /> Manage Vendors
+                  <Building size={11} color="#64748b" /> Vendors
                 </button>
               </div>
             </div>
@@ -1722,7 +1956,7 @@ export default function App() {
                   padding: '2px 8px', borderRadius: 999,
                   fontSize: 11.5, fontWeight: 800
                 }}>
-                  {gateQueue.length > 0 ? gateQueue.length : 2}
+                  {gateQueue.length > 0 ? gateQueue.length : discrepancies.filter(d => d.status !== 'VERIFIED_RESOLVED').length}
                 </span>
               </div>
               <button
@@ -1751,96 +1985,85 @@ export default function App() {
                   </tr>
                 </thead>
                 <tbody>
-                  {/* Default Representative Rows Matching Image 2 */}
-                  <tr style={{ borderBottom: '1px solid #f1f5f9' }}>
-                    <td style={{ padding: '14px', fontWeight: 700, color: '#0f172a', fontFamily: 'monospace' }}>
-                      INV-1045
-                    </td>
-                    <td style={{ padding: '14px', fontWeight: 500, color: '#334155' }}>
-                      Sharma Enterprises
-                    </td>
-                    <td style={{ padding: '14px', color: '#64748b' }}>
-                      GSTIN mismatch
-                    </td>
-                    <td style={{ padding: '14px', fontWeight: 700, color: '#0f172a' }}>
-                      ₹52,300
-                    </td>
-                    <td style={{ padding: '14px' }}>
-                      <span style={{
-                        background: '#fee2e2', color: '#dc2626',
-                        padding: '3px 9px', borderRadius: 6, fontSize: 11.5, fontWeight: 700
-                      }}>
-                        High
-                      </span>
-                    </td>
-                    <td style={{ padding: '14px', textAlign: 'right' }}>
-                      <button
-                        onClick={() => setReviewModalItem({
-                          invoice_number: 'INV-1045',
-                          supplier_name: 'Sharma Enterprises',
-                          issue: 'GSTIN mismatch',
-                          itc_risk: 52300,
-                          confidence: 'High',
-                          gate_id: gateQueue[0]?.gate_id || 'gate-1045',
-                          agent_a_code: 'GSTIN_TYPO_OR_MISMATCH',
-                          agent_a_reason: 'Supplier filed return using sister-branch GSTIN instead of contracted entity.',
-                          agent_b_verdict: 'AGREE',
-                          agent_b_critique: 'Independent cross-examination corroborates branch filing variance under Section 16(2).'
-                        })}
-                        style={{
-                          background: 'none', border: 'none', color: '#0f172a',
-                          fontSize: 13, fontWeight: 600, cursor: 'pointer'
-                        }}
-                      >
-                        Review →
-                      </button>
-                    </td>
-                  </tr>
+                  {(() => {
+                    const reviewItems = gateQueue.length > 0
+                      ? gateQueue
+                      : discrepancies.filter(d => d.status !== 'VERIFIED_RESOLVED');
 
-                  <tr style={{ borderBottom: '1px solid #f1f5f9' }}>
-                    <td style={{ padding: '14px', fontWeight: 700, color: '#0f172a', fontFamily: 'monospace' }}>
-                      INV-2078
-                    </td>
-                    <td style={{ padding: '14px', fontWeight: 500, color: '#334155' }}>
-                      Global Traders
-                    </td>
-                    <td style={{ padding: '14px', color: '#64748b' }}>
-                      Invoice not in GSTR-2B
-                    </td>
-                    <td style={{ padding: '14px', fontWeight: 700, color: '#0f172a' }}>
-                      ₹18,280
-                    </td>
-                    <td style={{ padding: '14px' }}>
-                      <span style={{
-                        background: '#fef3c7', color: '#b45309',
-                        padding: '3px 9px', borderRadius: 6, fontSize: 11.5, fontWeight: 700
-                      }}>
-                        Medium
-                      </span>
-                    </td>
-                    <td style={{ padding: '14px', textAlign: 'right' }}>
-                      <button
-                        onClick={() => setReviewModalItem({
-                          invoice_number: 'INV-2078',
-                          supplier_name: 'Global Traders',
-                          issue: 'Invoice not in GSTR-2B',
-                          itc_risk: 18280,
-                          confidence: 'Medium',
-                          gate_id: gateQueue[1]?.gate_id || 'gate-2078',
-                          agent_a_code: 'B2B_FILED_AS_B2C',
-                          agent_a_reason: 'Vendor failed to include Buyer GSTIN in Table 4A GSTR-1, causing omission from 2B stream.',
-                          agent_b_verdict: 'PARTIALLY_AGREE',
-                          agent_b_critique: 'Confirmed missing in auto-drafted stream. Rule 60 mandates supplier amendment in next cycle.'
-                        })}
-                        style={{
-                          background: 'none', border: 'none', color: '#0f172a',
-                          fontSize: 13, fontWeight: 600, cursor: 'pointer'
-                        }}
-                      >
-                        Review →
-                      </button>
-                    </td>
-                  </tr>
+                    if (reviewItems.length === 0) {
+                      return (
+                        <tr>
+                          <td colSpan={6} style={{ padding: '32px 14px', textAlign: 'center', color: '#64748b' }}>
+                            <div style={{ display: 'flex', flexDirection: 'column', alignItems: 'center', gap: 6 }}>
+                              <ShieldCheck size={28} color="#059669" />
+                              <div style={{ fontWeight: 600, color: '#0f172a' }}>All Clear — No Discrepancies Pending Review</div>
+                              <div style={{ fontSize: 12 }}>All invoices have been matched or verified. Run a new audit to reconcile updated files.</div>
+                            </div>
+                          </td>
+                        </tr>
+                      );
+                    }
+
+                    return reviewItems.map((item, idx) => {
+                      const invNumber = item.invoice_number || item.mismatch_id || `INV-${idx + 1}`;
+                      const supplierName = item.supplier_name || item.vendor_name || 'Supplier';
+                      const issueText = (item.root_cause_classification || item.mismatch_type || 'MISMATCH').replace(/_/g, ' ');
+                      const itcRisk = item.itc_exposure_rupees || 0;
+                      const isHigh = item.is_high_value || itcRisk >= 50000;
+                      const gateId = item.gate_id || `gate-${invNumber}`;
+
+                      return (
+                        <tr key={idx} style={{ borderBottom: '1px solid #f1f5f9' }}>
+                          <td style={{ padding: '14px', fontWeight: 700, color: '#0f172a', fontFamily: 'monospace' }}>
+                            {invNumber}
+                          </td>
+                          <td style={{ padding: '14px', fontWeight: 500, color: '#334155' }}>
+                            {supplierName}
+                          </td>
+                          <td style={{ padding: '14px', color: '#64748b' }}>
+                            {issueText}
+                          </td>
+                          <td style={{ padding: '14px', fontWeight: 700, color: '#0f172a' }}>
+                            ₹{itcRisk.toLocaleString()}
+                          </td>
+                          <td style={{ padding: '14px' }}>
+                            <span style={{
+                              background: isHigh ? '#fee2e2' : '#fef3c7',
+                              color: isHigh ? '#dc2626' : '#b45309',
+                              padding: '3px 9px',
+                              borderRadius: 6,
+                              fontSize: 11.5,
+                              fontWeight: 700
+                            }}>
+                              {isHigh ? 'High' : 'Medium'}
+                            </span>
+                          </td>
+                          <td style={{ padding: '14px', textAlign: 'right' }}>
+                            <button
+                              onClick={() => setReviewModalItem({
+                                invoice_number: invNumber,
+                                supplier_name: supplierName,
+                                issue: issueText,
+                                itc_risk: itcRisk,
+                                confidence: isHigh ? 'High' : 'Medium',
+                                gate_id: gateId,
+                                agent_a_code: item.root_cause_code || item.root_cause_classification || 'STATUTORY_RECONCILIATION',
+                                agent_a_reason: item.details || item.agent_a_reasoning || 'Classified by deterministic GST reconciliation engine.',
+                                agent_b_verdict: item.agent_b_verdict || (item.status === 'VERIFIED_RESOLVED' ? 'RESOLVED' : 'PENDING_REVIEW'),
+                                agent_b_critique: item.agent_b_critique || item.rule_citation || 'Statutory review under Rule 60 CGST.'
+                              })}
+                              style={{
+                                background: 'none', border: 'none', color: '#0f172a',
+                                fontSize: 13, fontWeight: 600, cursor: 'pointer'
+                              }}
+                            >
+                              Review →
+                            </button>
+                          </td>
+                        </tr>
+                      );
+                    });
+                  })()}
                 </tbody>
               </table>
             </div>
@@ -1937,10 +2160,10 @@ export default function App() {
             </div>
 
             {/* Modal Body */}
-            <div style={{ padding: 24 }}>
-              <div style={{ display: 'grid', gridTemplateColumns: '1fr 1fr', gap: 14, marginBottom: 20 }}>
+            <div style={{ padding: 24, maxHeight: '80vh', overflowY: 'auto' }}>
+              <div style={{ display: 'grid', gridTemplateColumns: '1fr 1fr', gap: 14, marginBottom: 16 }}>
                 <div style={{ background: '#f8fafc', padding: 12, borderRadius: 10, border: '1px solid #e2e8f0' }}>
-                  <div style={{ fontSize: 11, color: '#64748b' }}>Detected Issue</div>
+                  <div style={{ fontSize: 11, color: '#64748b' }}>Detected Issue (Deterministic Engine)</div>
                   <div style={{ fontSize: 14, fontWeight: 700, color: '#0f172a', marginTop: 2 }}>{reviewModalItem.issue}</div>
                 </div>
 
@@ -1952,41 +2175,139 @@ export default function App() {
                 </div>
               </div>
 
-              {/* Multi-Agent Breakdown */}
-              <div style={{ background: '#f8fafc', border: '1px solid #e2e8f0', borderRadius: 12, padding: 16, marginBottom: 16 }}>
-                <div style={{ fontSize: 12, fontWeight: 700, color: '#059669', marginBottom: 4 }}>
-                  Agent A (Root-Cause Classifier): {reviewModalItem.agent_a_code}
+              {/* AI Explanation of Deterministic Result */}
+              <div style={{ background: '#f0fdf4', border: '1px solid #bbf7d0', borderRadius: 12, padding: 16, marginBottom: 16 }}>
+                <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center', marginBottom: 6 }}>
+                  <div style={{ fontSize: 12, fontWeight: 700, color: '#166534', display: 'flex', alignItems: 'center', gap: 6 }}>
+                    <Bot size={15} color="#166534" />
+                    AI Statutory Explanation (Engine Fact Sheet)
+                  </div>
+                  {explanationData?.source && (
+                    <span style={{ fontSize: 10, color: '#16a34a', fontWeight: 600, background: '#dcfce7', padding: '2px 8px', borderRadius: 999 }}>
+                      {explanationData.source === 'ai' ? 'Live AI Stream' : 'Statutory Engine Fallback'}
+                    </span>
+                  )}
                 </div>
-                <div style={{ fontSize: 12.5, color: '#475569', lineHeight: 1.4, marginBottom: 10 }}>
-                  {reviewModalItem.agent_a_reason}
-                </div>
-
-                <div style={{ fontSize: 12, fontWeight: 700, color: '#0284c7', marginBottom: 4 }}>
-                  Agent B (Cross-Examiner Verdict): {reviewModalItem.agent_b_verdict}
-                </div>
-                <div style={{ fontSize: 12.5, color: '#475569', lineHeight: 1.4 }}>
-                  {reviewModalItem.agent_b_critique}
-                </div>
+                {loadingExplanation ? (
+                  <div style={{ fontSize: 12.5, color: '#64748b', fontStyle: 'italic' }}>
+                    Generating deterministic context explanation...
+                  </div>
+                ) : (
+                  <div style={{ fontSize: 12.5, color: '#14532d', lineHeight: 1.5 }}>
+                    {explanationData?.explanation || reviewModalItem.agent_a_reason || 'Reconciliation discrepancy detected. Vendor action required for statutory eligibility.'}
+                  </div>
+                )}
               </div>
 
-              {/* Edit message override textarea if toggled */}
-              {isEditingMessage ? (
-                <div style={{ marginBottom: 16 }}>
-                  <label style={{ fontSize: 12, fontWeight: 600, color: '#0f172a', display: 'block', marginBottom: 6 }}>
-                    Custom Nudge Instructions (will override notice body):
-                  </label>
-                  <textarea
-                    rows={3}
-                    value={customEditMsg}
-                    onChange={(e) => setCustomEditMsg(e.target.value)}
-                    placeholder="Enter custom statutory guidance or payment-hold warning..."
-                    style={{
-                      width: '100%', borderRadius: 8, border: '1px solid #cbd5e1',
-                      padding: 10, fontSize: 13, outline: 'none'
-                    }}
-                  />
+              {/* Bilingual Vendor Nudge Section */}
+              <div style={{ background: '#f8fafc', border: '1px solid #e2e8f0', borderRadius: 12, padding: 16, marginBottom: 16 }}>
+                <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center', marginBottom: 10 }}>
+                  <div style={{ fontSize: 12, fontWeight: 700, color: '#0f172a' }}>
+                    Actionable Vendor Nudge (Statutory Rule 60 Notice)
+                  </div>
+                  
+                  {/* Language Selector Tabs */}
+                  <div style={{ display: 'flex', gap: 4, background: '#e2e8f0', padding: 2, borderRadius: 6 }}>
+                    <button
+                      type="button"
+                      onClick={() => setNudgeLanguage('en')}
+                      style={{
+                        padding: '3px 10px',
+                        fontSize: 11,
+                        fontWeight: 700,
+                        borderRadius: 4,
+                        border: 'none',
+                        cursor: 'pointer',
+                        background: nudgeLanguage === 'en' ? '#ffffff' : 'transparent',
+                        color: nudgeLanguage === 'en' ? '#0f172a' : '#64748b',
+                        boxShadow: nudgeLanguage === 'en' ? '0 1px 2px rgba(0,0,0,0.05)' : 'none'
+                      }}
+                    >
+                      English
+                    </button>
+                    <button
+                      type="button"
+                      onClick={() => setNudgeLanguage('hi')}
+                      style={{
+                        padding: '3px 10px',
+                        fontSize: 11,
+                        fontWeight: 700,
+                        borderRadius: 4,
+                        border: 'none',
+                        cursor: 'pointer',
+                        background: nudgeLanguage === 'hi' ? '#ffffff' : 'transparent',
+                        color: nudgeLanguage === 'hi' ? '#0f172a' : '#64748b',
+                        boxShadow: nudgeLanguage === 'hi' ? '0 1px 2px rgba(0,0,0,0.05)' : 'none'
+                      }}
+                    >
+                      हिंदी (Hindi)
+                    </button>
+                  </div>
                 </div>
-              ) : null}
+
+                {isEditingMessage ? (
+                  <div style={{ marginBottom: 8 }}>
+                    <textarea
+                      rows={4}
+                      value={customEditMsg}
+                      onChange={(e) => setCustomEditMsg(e.target.value)}
+                      placeholder="Enter custom statutory guidance or payment-hold warning..."
+                      style={{
+                        width: '100%', borderRadius: 8, border: '1px solid #cbd5e1',
+                        padding: 10, fontSize: 12.5, outline: 'none', fontFamily: 'inherit',
+                        boxSizing: 'border-box'
+                      }}
+                    />
+                  </div>
+                ) : (
+                  <div style={{
+                    background: '#ffffff',
+                    border: '1px solid #e2e8f0',
+                    borderRadius: 8,
+                    padding: 12,
+                    fontSize: 12.5,
+                    color: '#334155',
+                    lineHeight: 1.5,
+                    whiteSpace: 'pre-wrap'
+                  }}>
+                    {loadingExplanation ? (
+                      <span style={{ color: '#94a3b8', fontStyle: 'italic' }}>Drafting bilingual notice...</span>
+                    ) : (
+                      nudgeLanguage === 'hi' 
+                        ? (explanationData?.vendor_nudge_hindi || 'कृपया बिल विवरण एवं GSTR-1 फाइलिंग की जांच करें।')
+                        : (explanationData?.vendor_nudge_english || 'Please verify invoice details and GSTR-1 reporting to enable ITC reconciliation.')
+                    )}
+                  </div>
+                )}
+
+                <div style={{ display: 'flex', justifyContent: 'flex-end', marginTop: 8 }}>
+                  <button
+                    type="button"
+                    onClick={() => {
+                      const textToCopy = isEditingMessage 
+                        ? customEditMsg 
+                        : (nudgeLanguage === 'hi' ? explanationData?.vendor_nudge_hindi : explanationData?.vendor_nudge_english);
+                      if (textToCopy) {
+                        navigator.clipboard?.writeText(textToCopy);
+                        showNotification('Nudge text copied to clipboard!');
+                      }
+                    }}
+                    style={{
+                      background: 'transparent',
+                      border: 'none',
+                      color: '#059669',
+                      fontSize: 11,
+                      fontWeight: 600,
+                      cursor: 'pointer',
+                      display: 'flex',
+                      alignItems: 'center',
+                      gap: 4
+                    }}
+                  >
+                    <Copy size={13} /> Copy Nudge Text
+                  </button>
+                </div>
+              </div>
 
               {/* Action Buttons */}
               <div style={{ display: 'flex', gap: 10, justifyContent: 'flex-end' }}>
@@ -2004,6 +2325,7 @@ export default function App() {
                   onClick={() => {
                     if (!isEditingMessage) {
                       setIsEditingMessage(true);
+                      setCustomEditMsg(nudgeLanguage === 'hi' ? explanationData?.vendor_nudge_hindi : explanationData?.vendor_nudge_english || '');
                     } else {
                       handleGateDecision(reviewModalItem.gate_id, 'EDITED', customEditMsg);
                     }

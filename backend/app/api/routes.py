@@ -8,12 +8,13 @@ from __future__ import annotations
 
 import time
 import os
+import random
 from typing import Any, Dict, List, Optional
 from fastapi import APIRouter, HTTPException, BackgroundTasks, Query, UploadFile, File
 from fastapi.responses import FileResponse
 from pydantic import BaseModel
 
-from ..core.gst_reconciliation import GSTReconciliationEngine, InvoiceRecord, MismatchType
+from ..core.gst_reconciliation import GSTReconciliationEngine, InvoiceRecord, MismatchType, DiscrepancyResult
 from ..core.file_parser import parse_file_content
 from ..core.synthetic_data_generator import (
     generate_demo_dataset,
@@ -27,6 +28,7 @@ from ..services.human_gate import HumanGate, HumanDecision
 from ..services.notice_generator import generate_pdf_notice, generate_bilingual_nudges
 from ..services.nudge_dispatcher import NudgeDispatcher
 from ..services.audit_service import AuditService
+from ..services.ai_explanation_service import AIExplanationService, ExplanationRequest, ExplanationResponse
 from ..core.db import get_db_summary, log_benchmark_run, log_human_decision, log_notice_dispatch
 
 router = APIRouter(prefix="/api")
@@ -36,6 +38,7 @@ engine = GSTReconciliationEngine(high_value_threshold=50000.0)
 rocketride_svc = RocketRideService()
 gate = HumanGate(confidence_threshold=0.85, high_value_threshold_inr=50000.0)
 dispatcher = NudgeDispatcher()
+ai_explanation_svc = AIExplanationService()
 audit_svc = AuditService(
     reconciliation_engine=engine,
     rocketride_service=rocketride_svc,
@@ -50,6 +53,32 @@ STATE: Dict[str, Any] = {
     "audit_results": {},
     "status": "INITIALIZED"
 }
+
+
+def _serialize_discrepancy(d: DiscrepancyResult) -> Dict[str, Any]:
+    return {
+        "id": d.id,
+        "invoice_number": d.invoice_number,
+        "supplier_gstin": d.supplier_gstin,
+        "supplier_name": d.supplier_name,
+        "mismatch_type": d.mismatch_type.value,
+        "reconciliation_outcome": d.reconciliation_outcome,
+        "severity": d.severity.value,
+        "itc_exposure_rupees": d.itc_exposure_rupees,
+        "itc_exposure": d.itc_exposure,
+        "purchase_register_tax": d.purchase_register_tax,
+        "gstr_2b_tax": d.gstr_2b_tax,
+        "taxable_value_diff": d.taxable_value_diff,
+        "details": d.details,
+        "rule_citation": d.rule_citation,
+        "is_high_value": d.is_high_value,
+        "requires_human_gate": d.requires_human_gate,
+        "status": d.status,
+        "root_cause_classification": d.root_cause_classification,
+        "root_cause_code": d.root_cause_code,
+        "matched_gstr2b_invoice": d.matched_gstr2b_invoice,
+        "candidate_count": d.candidate_count
+    }
 
 
 # ─── Pydantic Models ──────────────────────────────────────────────────────────
@@ -135,25 +164,7 @@ def run_reconciliation():
     STATE["discrepancies"] = discrepancies
     STATE["status"] = "RECONCILED"
 
-    disc_dicts = []
-    for d in discrepancies:
-        disc_dicts.append({
-            "id": d.id,
-            "invoice_number": d.invoice_number,
-            "supplier_gstin": d.supplier_gstin,
-            "supplier_name": d.supplier_name,
-            "mismatch_type": d.mismatch_type.value,
-            "severity": d.severity.value,
-            "itc_exposure_rupees": d.itc_exposure_rupees,
-            "purchase_register_tax": d.purchase_register_tax,
-            "gstr_2b_tax": d.gstr_2b_tax,
-            "taxable_value_diff": d.taxable_value_diff,
-            "details": d.details,
-            "rule_citation": d.rule_citation,
-            "is_high_value": d.is_high_value,
-            "requires_human_gate": d.requires_human_gate,
-            "status": d.status
-        })
+    disc_dicts = [_serialize_discrepancy(d) for d in discrepancies]
 
     total_exposure = sum(d.itc_exposure_rupees for d in discrepancies)
 
@@ -226,25 +237,7 @@ def run_custom_reconciliation(req: CustomReconcileRequest):
     STATE["discrepancies"] = discrepancies
     STATE["status"] = "RECONCILED"
 
-    disc_dicts = []
-    for d in discrepancies:
-        disc_dicts.append({
-            "id": d.id,
-            "invoice_number": d.invoice_number,
-            "supplier_gstin": d.supplier_gstin,
-            "supplier_name": d.supplier_name,
-            "mismatch_type": d.mismatch_type.value,
-            "severity": d.severity.value,
-            "itc_exposure_rupees": d.itc_exposure_rupees,
-            "purchase_register_tax": d.purchase_register_tax,
-            "gstr_2b_tax": d.gstr_2b_tax,
-            "taxable_value_diff": d.taxable_value_diff,
-            "details": d.details,
-            "rule_citation": d.rule_citation,
-            "is_high_value": d.is_high_value,
-            "requires_human_gate": d.requires_human_gate,
-            "status": d.status
-        })
+    disc_dicts = [_serialize_discrepancy(d) for d in discrepancies]
 
     return {
         "execution_time_ms": round(elapsed_ms, 2),
@@ -322,25 +315,7 @@ async def upload_and_reconcile(
     STATE["discrepancies"] = discrepancies
     STATE["status"] = "RECONCILED"
 
-    disc_dicts = []
-    for d in discrepancies:
-        disc_dicts.append({
-            "id": d.id,
-            "invoice_number": d.invoice_number,
-            "supplier_gstin": d.supplier_gstin,
-            "supplier_name": d.supplier_name,
-            "mismatch_type": d.mismatch_type.value,
-            "severity": d.severity.value,
-            "itc_exposure_rupees": d.itc_exposure_rupees,
-            "purchase_register_tax": d.purchase_register_tax,
-            "gstr_2b_tax": d.gstr_2b_tax,
-            "taxable_value_diff": d.taxable_value_diff,
-            "details": d.details,
-            "rule_citation": d.rule_citation,
-            "is_high_value": d.is_high_value,
-            "requires_human_gate": d.requires_human_gate,
-            "status": d.status
-        })
+    disc_dicts = [_serialize_discrepancy(d) for d in discrepancies]
 
     return {
         "execution_time_ms": round(elapsed_ms, 2),
@@ -553,43 +528,394 @@ def download_pdf_notice(invoice_number: str):
     )
 
 
-@router.post("/simulate/vendor-amend")
-def simulate_vendor_amendment(req: SimulateVendorActionRequest):
-    """Simulates the vendor uploading the missing invoice in the GST Portal."""
-    result = dispatcher.simulate_vendor_amendment(req.invoice_number, req.filing_arn)
+class SimulateAmendmentRequest(BaseModel):
+    invoice_number: str
+    amendment_type: Optional[str] = "CORRECT_AND_MATCH"  # "CORRECT_AND_MATCH", "INVALID_AMOUNT", "INVALID_TAX_HEAD", "INCOMPLETE"
+    amended_taxable_value: Optional[float] = None
+    amended_cgst: Optional[float] = None
+    amended_sgst: Optional[float] = None
+    amended_igst: Optional[float] = None
+    amended_invoice_number: Optional[str] = None
+    filing_arn: Optional[str] = None
+    remarks: Optional[str] = None
+
+
+class VerifyAmendmentRequest(BaseModel):
+    invoice_number: str
+
+
+@router.post("/amendment/simulate")
+def simulate_amendment(req: SimulateAmendmentRequest):
+    """
+    Step 7 Vendor Amendment Simulation:
+    Simulates a vendor amending their GSTR-1 return for an unresolved invoice.
+    Sets the invoice status to PENDING_VERIFICATION in CrediFlow.
+    Does NOT mark the invoice Verified at this stage.
+    """
+    discrepancies = STATE.get("discrepancies", [])
+    if not discrepancies:
+        pr, g2b = generate_demo_dataset()
+        STATE["purchase_register"] = pr
+        STATE["gstr_2b_records"] = g2b
+        discrepancies = engine.reconcile(pr, g2b)
+        STATE["discrepancies"] = discrepancies
+
+    target = next((d for d in discrepancies if d.invoice_number == req.invoice_number), None)
+    pr_list = STATE.get("purchase_register", [])
+    pr_rec = next((r for r in pr_list if r.invoice_number == req.invoice_number), None)
+
+    if not target and not pr_rec:
+        pr_rec = InvoiceRecord(
+            invoice_number=req.invoice_number,
+            invoice_date="2024-07-15",
+            supplier_gstin="27AABCR1234F1ZS",
+            supplier_name="M/s Rajesh Traders",
+            buyer_gstin=BUYER_GSTIN,
+            taxable_value=50000.0,
+            cgst=4500.0,
+            sgst=4500.0,
+            igst=0.0,
+            total_amount=59000.0
+        )
+        STATE.setdefault("purchase_register", []).append(pr_rec)
+
+    arn = req.filing_arn or f"ARN-2026-AA27{random.randint(100000, 999999)}K"
+
+    # Base record from purchase register
+    if pr_rec:
+        inv_num = req.amended_invoice_number or pr_rec.invoice_number
+        tax_val = req.amended_taxable_value if req.amended_taxable_value is not None else pr_rec.taxable_value
+        cgst_val = req.amended_cgst if req.amended_cgst is not None else pr_rec.cgst
+        sgst_val = req.amended_sgst if req.amended_sgst is not None else pr_rec.sgst
+        igst_val = req.amended_igst if req.amended_igst is not None else pr_rec.igst
+        supp_gstin = pr_rec.supplier_gstin
+        supp_name = pr_rec.supplier_name
+        buyer_gstin = pr_rec.buyer_gstin
+    else:
+        inv_num = req.invoice_number
+        tax_val = 50000.0
+        cgst_val = 4500.0
+        sgst_val = 4500.0
+        igst_val = 0.0
+        supp_gstin = target.supplier_gstin if target else "27AABCR1234F1ZS"
+        supp_name = target.supplier_name if target else "Supplier"
+        buyer_gstin = BUYER_GSTIN
+
+    # Handle simulation mode
+    if req.amendment_type == "INVALID_AMOUNT":
+        tax_val = round(tax_val - 500.0, 2)
+        cgst_val = round(cgst_val - 45.0, 2)
+        sgst_val = round(sgst_val - 45.0, 2)
+    elif req.amendment_type == "INVALID_TAX_HEAD":
+        if igst_val > 0:
+            cgst_val = round(igst_val / 2.0, 2)
+            sgst_val = round(igst_val / 2.0, 2)
+            igst_val = 0.0
+        else:
+            igst_val = round(cgst_val + sgst_val, 2)
+            cgst_val = 0.0
+            sgst_val = 0.0
+
+    tot_tax = round(igst_val + cgst_val + sgst_val, 2)
+    tot_amt = round(tax_val + tot_tax, 2)
+
+    staged_rec = InvoiceRecord(
+        invoice_number=inv_num,
+        invoice_date="2024-07-20",
+        supplier_gstin=supp_gstin,
+        supplier_name=supp_name,
+        buyer_gstin=buyer_gstin,
+        taxable_value=tax_val,
+        cgst=cgst_val,
+        sgst=sgst_val,
+        igst=igst_val,
+        total_amount=tot_amt
+    )
+
+    STATE.setdefault("staged_amendments", {})[req.invoice_number] = staged_rec
+
+    # Transition status to PENDING_VERIFICATION in discrepancy list
+    if target:
+        target.status = "PENDING_VERIFICATION"
+
+    history_entry = {
+        "invoice_number": req.invoice_number,
+        "timestamp": time.strftime("%Y-%m-%d %H:%M:%S"),
+        "action": "VENDOR_AMENDMENT_SIMULATED",
+        "status": "PENDING_VERIFICATION",
+        "filing_arn": arn,
+        "amendment_type": req.amendment_type,
+        "details": f"Vendor staged amendment under ARN {arn}. Status set to PENDING_VERIFICATION."
+    }
+    STATE.setdefault("amendment_history", []).append(history_entry)
+
     return {
         "success": True,
-        "resolution": result
+        "invoice_number": req.invoice_number,
+        "status": "PENDING_VERIFICATION",
+        "filing_arn": arn,
+        "message": "Vendor amendment simulated and staged. Status is now PENDING_VERIFICATION. Re-run reconciliation engine to verify.",
+        "staged_amendment": {
+            "invoice_number": inv_num,
+            "supplier_gstin": supp_gstin,
+            "taxable_value": tax_val,
+            "total_tax": tot_tax,
+            "total_amount": tot_amt
+        }
+    }
+
+
+@router.post("/amendment/verify")
+def verify_amendment(req: VerifyAmendmentRequest):
+    """
+    Step 7 Re-Reconciliation & Verification:
+    Re-runs the exact SAME deterministic reconciliation engine on the updated GSTR-2B data.
+    Only marks the invoice VERIFIED if the engine confirms a valid match.
+    Calculates exact ITC recovery and updates total blocked ITC dynamically.
+    """
+    pr = STATE.get("purchase_register") or generate_demo_dataset()[0]
+    g2b = STATE.get("gstr_2b_records") or generate_demo_dataset()[1]
+    STATE["purchase_register"] = pr
+
+    prev_discrepancies = STATE.get("discrepancies", [])
+    if not prev_discrepancies:
+        prev_discrepancies = engine.reconcile(pr, g2b)
+        STATE["discrepancies"] = prev_discrepancies
+
+    prev_blocked_itc = engine.calculate_total_blocked_itc(prev_discrepancies)
+
+    # Apply staged amendment to GSTR-2B if present
+    staged = STATE.get("staged_amendments", {}).get(req.invoice_number)
+    updated_g2b = list(g2b)
+
+    if staged:
+        replaced = False
+        for idx, rec in enumerate(updated_g2b):
+            if rec.invoice_number == staged.invoice_number and rec.supplier_gstin == staged.supplier_gstin:
+                updated_g2b[idx] = staged
+                replaced = True
+                break
+        if not replaced:
+            updated_g2b.append(staged)
+    else:
+        # If none explicitly staged, take matching PR record
+        pr_rec = next((r for r in pr if r.invoice_number == req.invoice_number), None)
+        if pr_rec:
+            updated_g2b.append(pr_rec)
+
+    STATE["gstr_2b_records"] = updated_g2b
+
+    # ── RE-RUN THE EXACT SAME DETERMINISTIC RECONCILIATION ENGINE ──
+    new_discrepancies = engine.reconcile(pr, updated_g2b)
+    STATE["discrepancies"] = new_discrepancies
+
+    current_blocked_itc = engine.calculate_total_blocked_itc(new_discrepancies)
+    remaining_target = next((d for d in new_discrepancies if d.invoice_number == req.invoice_number), None)
+
+    if remaining_target is None:
+        # Successfully reconciled!
+        verification_success = True
+        status = "VERIFIED"
+        outcome = "MATCHED"
+        inv_exposure = 0.0
+        itc_recovered = round(max(0.0, prev_blocked_itc - current_blocked_itc), 2)
+        audit_note = f"Invoice {req.invoice_number} successfully verified and reconciled by engine. ITC exposure reduced to ₹0.00."
+    else:
+        # Re-reconciliation detected an ongoing discrepancy
+        verification_success = False
+        status = remaining_target.status
+        outcome = remaining_target.mismatch_type.value
+        inv_exposure = remaining_target.itc_exposure_rupees
+        itc_recovered = 0.0
+        audit_note = f"Verification failed for {req.invoice_number}. Deterministic engine detected {outcome} ({remaining_target.details})."
+
+    history_entry = {
+        "invoice_number": req.invoice_number,
+        "timestamp": time.strftime("%Y-%m-%d %H:%M:%S"),
+        "action": "RE_RECONCILIATION_VERIFICATION",
+        "status": status,
+        "verification_success": verification_success,
+        "reconciliation_outcome": outcome,
+        "itc_recovered": itc_recovered,
+        "current_blocked_itc": current_blocked_itc,
+        "details": audit_note
+    }
+    STATE.setdefault("amendment_history", []).append(history_entry)
+
+    return {
+        "success": True,
+        "invoice_number": req.invoice_number,
+        "verification_success": verification_success,
+        "status": status,
+        "reconciliation_outcome": outcome,
+        "invoice_itc_exposure": inv_exposure,
+        "previous_blocked_itc": prev_blocked_itc,
+        "current_blocked_itc": current_blocked_itc,
+        "itc_recovered_rupees": itc_recovered,
+        "remaining_discrepancies_count": len(new_discrepancies),
+        "audit_note": audit_note,
+        "discrepancies": [_serialize_discrepancy(d) for d in new_discrepancies]
+    }
+
+
+@router.get("/amendment/history")
+def get_amendment_history():
+    """Returns the immutable audit log of simulated amendments and verification results."""
+    return {
+        "history": STATE.get("amendment_history", []),
+        "count": len(STATE.get("amendment_history", []))
+    }
+
+
+@router.post("/simulate/vendor-amend")
+def simulate_vendor_amendment_legacy(req: SimulateVendorActionRequest):
+    """Simulates the vendor uploading the missing invoice in the GST Portal."""
+    sim_res = simulate_amendment(SimulateAmendmentRequest(
+        invoice_number=req.invoice_number,
+        filing_arn=req.filing_arn
+    ))
+    return {
+        "success": True,
+        "resolution": {
+            "invoice_number": req.invoice_number,
+            "status": "PENDING_VERIFICATION",
+            "filing_arn": sim_res["filing_arn"],
+            "filing_period": "2026-04",
+            "table_name": "Table 4A (B2B Invoices)"
+        }
     }
 
 
 @router.post("/simulate/re-audit")
-def simulate_re_audit(invoice_number: str = Query("INV-0881")):
+def simulate_re_audit_legacy(invoice_number: str = Query("INV-0881")):
     """
     Re-runs deterministic reconciliation after simulated vendor amendment.
     Verifies that invoice is now matched in GSTR-2B and ITC exposure drops to ₹0.00.
     """
-    # Create amended GSTR-2B record
-    pr, g2b = generate_demo_dataset()
-
-    # Find the missing invoice in PR and add it into GSTR-2B to simulate filing
-    amended_rec = next((r for r in pr if r.invoice_number == invoice_number), None)
-    if amended_rec:
-        g2b.append(amended_rec)
-
-    new_discrepancies = engine.reconcile(pr, g2b)
-    orig_exposure = sum(d.itc_exposure_rupees for d in STATE["discrepancies"]) if STATE["discrepancies"] else 70580.0
-    new_exposure = sum(d.itc_exposure_rupees for d in new_discrepancies)
-
+    v_res = verify_amendment(VerifyAmendmentRequest(invoice_number=invoice_number))
     return {
         "invoice_number": invoice_number,
-        "status": "VERIFIED_RESOLVED",
-        "previous_exposure_rupees": orig_exposure,
-        "current_exposure_rupees": new_exposure,
-        "itc_recovered_rupees": orig_exposure - new_exposure,
-        "remaining_discrepancies_count": len(new_discrepancies),
-        "audit_note": f"Invoice {invoice_number} successfully verified in updated GSTR-2B stream. Input Tax Credit is now 100% compliant."
+        "status": "VERIFIED_RESOLVED" if v_res["verification_success"] else v_res["status"],
+        "previous_exposure_rupees": v_res["previous_blocked_itc"],
+        "current_exposure_rupees": v_res["current_blocked_itc"],
+        "itc_recovered_rupees": v_res["itc_recovered_rupees"],
+        "remaining_discrepancies_count": v_res["remaining_discrepancies_count"],
+        "discrepancies": v_res["discrepancies"],
+        "audit_note": v_res["audit_note"]
     }
+
+
+class ResolveDiscrepancyRequest(BaseModel):
+    invoice_number: str
+    resolution_note: Optional[str] = "Manually verified & cleared by Finance Team"
+
+
+@router.post("/discrepancy/resolve")
+def resolve_discrepancy(req: ResolveDiscrepancyRequest):
+    """
+    Directly marks a discrepancy as verified and resolved.
+    Sets its unresolved ITC exposure to ₹0.00 and decrements the total blocked ITC.
+    """
+    discrepancies = STATE.get("discrepancies", [])
+    target = next((d for d in discrepancies if d.invoice_number == req.invoice_number), None)
+    if not target:
+        raise HTTPException(status_code=404, detail=f"Discrepancy for invoice {req.invoice_number} not found in active ledger.")
+
+    prev_exposure = target.itc_exposure_rupees
+    target.resolve(req.resolution_note)
+
+    total_blocked = engine.calculate_total_blocked_itc(discrepancies)
+    breakdown = engine.calculate_itc_breakdown(discrepancies)
+
+    return {
+        "success": True,
+        "invoice_number": req.invoice_number,
+        "status": "VERIFIED_RESOLVED",
+        "resolved_exposure_rupees": prev_exposure,
+        "total_blocked_itc": total_blocked,
+        "unresolved_count": breakdown["unresolved_count"],
+        "resolved_count": breakdown["resolved_count"],
+        "summary": breakdown
+    }
+
+
+class DiscrepancyExplainRequest(BaseModel):
+    invoice_number: str
+
+
+@router.post("/explain")
+async def explain_reconciliation_result(req: ExplanationRequest):
+    """
+    Downstream AI explanation layer for deterministic reconciliation results.
+    Never alters financial values or status.
+    """
+    res = await ai_explanation_svc.explain(req)
+    return res.model_dump()
+
+
+@router.post("/discrepancy/explain")
+async def explain_discrepancy_by_invoice(req: DiscrepancyExplainRequest):
+    """
+    Generates explanation and bilingual vendor nudges for a specific discrepancy
+    using its deterministic engine values.
+    """
+    discrepancies = STATE.get("discrepancies")
+    if not discrepancies:
+        pr, g2b = generate_demo_dataset()
+        STATE["purchase_register"] = pr
+        STATE["gstr_2b_records"] = g2b
+        discrepancies = engine.reconcile(pr, g2b)
+        STATE["discrepancies"] = discrepancies
+
+    target = next((d for d in discrepancies if d.invoice_number == req.invoice_number), None)
+    if not target:
+        # Fallback to demo invoice if not in active list
+        target_dict = {
+            "invoice_number": req.invoice_number,
+            "vendor_gstin": "27AABCR1234F1ZS",
+            "vendor_name": "M/s Rajesh Traders",
+            "reconciliation_outcome": "MISSING_IN_2B",
+            "root_cause_code": "MISSING_IN_2B",
+            "itc_exposure": 42500.0,
+            "status": "UNRESOLVED",
+            "matched_gstr2b_record": None,
+            "details": "Invoice not found in GSTR-2B statement."
+        }
+        exp_req = ExplanationRequest(**target_dict)
+    else:
+        exp_req = ExplanationRequest(
+            invoice_number=target.invoice_number,
+            vendor_gstin=target.supplier_gstin,
+            vendor_name=target.supplier_name,
+            buyer_gstin=BUYER_GSTIN,
+            reconciliation_outcome=target.reconciliation_outcome or target.mismatch_type.value,
+            root_cause_code=target.root_cause_code or target.root_cause_classification or target.mismatch_type.value,
+            itc_exposure=target.itc_exposure_rupees,
+            status=target.status,
+            matched_gstr2b_record=target.matched_gstr2b_invoice,
+            details=target.details,
+            taxable_value=target.taxable_value_diff
+        )
+
+    res = await ai_explanation_svc.explain(exp_req)
+    return res.model_dump()
+
+
+@router.post("/nudge/bilingual")
+async def get_bilingual_nudge(req: ExplanationRequest, language: Optional[str] = None):
+    """Returns English and Hindi statutory nudges for an invoice."""
+    res = await ai_explanation_svc.explain(req)
+    exp = res.model_dump()
+    
+    if language == "en":
+        exp["language"] = "en"
+        exp["nudge_text"] = exp["vendor_nudge_english"]
+    elif language == "hi":
+        exp["language"] = "hi"
+        exp["nudge_text"] = exp["vendor_nudge_hindi"]
+    return exp
+
+
 
 
 @router.get("/benchmarks")
@@ -778,14 +1104,21 @@ def get_vendor_scorecards():
 
         scorecards.append({
             "vendor_name": v["name"],
+            "supplier_name": v["name"],
             "gstin": gstin,
+            "supplier_gstin": gstin,
             "state": v["state"],
             "compliance_score": vcs["score"],
             "risk_tier": vcs["tier"],
+            "risk_level": vcs["tier"],
             "tier_label": vcs["tier_label"],
             "score_components": vcs["components"],
             "avg_delay_days": avg_days,
             "itc_blocked_inr": itc_blocked,
+            "itc_exposure_rupees": itc_blocked,
+            "total_invoices": total_inv,
+            "matched_count": max(0, total_inv - mismatched),
+            "discrepancy_count": mismatched,
             "mismatched_invoices": mismatched,
             "status": status,
             "phone": v["phone"],
