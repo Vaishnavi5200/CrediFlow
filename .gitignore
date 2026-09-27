@@ -35,9 +35,6 @@ public/*.html
 public/*.js
 public/*.css
 
-# ── RocketRide local workspace ────────────────────────────────────────────────
-.rocketride/
-
 # ── Vercel deployment cache ───────────────────────────────────────────────────
 .vercel/
 

@@ -1066,7 +1066,7 @@ export default function App() {
                           <td style={{ padding: '13px 14px', textAlign: 'right', fontWeight: 800, color: '#dc2626' }}>₹{(d.itc_exposure_rupees||0).toLocaleString()}</td>
                           <td style={{ padding: '13px 14px', color: '#475569', fontSize: 12 }}>{d.root_cause_classification || 'Under Review'}</td>
                           <td style={{ padding: '13px 14px', textAlign: 'right' }}>
-                            <button onClick={() => setReviewModalItem({ invoice_number: d.invoice_number, supplier_name: d.supplier_name, issue: d.mismatch_type, itc_risk: d.itc_exposure_rupees, confidence: 'High', gate_id: gateQueue[0]?.gate_id || 'gate-1', agent_a_code: d.root_cause_classification||'UNKNOWN', agent_a_reason: d.agent_a_reasoning||'Classified by statutory fallback engine.', agent_b_verdict: d.agent_b_verdict||'AGREE', agent_b_critique: d.agent_b_critique||'Independent cross-examination confirms root cause.' })} style={{ background: 'none', border: '1px solid #e2e8f0', borderRadius: 7, padding: '5px 12px', fontSize: 12, fontWeight: 600, cursor: 'pointer', color: '#0f172a' }}>Review →</button>
+                            <button onClick={() => setReviewModalItem({ invoice_number: d.invoice_number, supplier_name: d.supplier_name, issue: d.mismatch_type, itc_risk: d.itc_exposure_rupees, confidence: 'High', gate_id: gateQueue[0]?.gate_id || 'gate-1', root_cause_code: d.root_cause_classification||'UNKNOWN', root_cause_reason: d.details||'Classified by deterministic GST engine.' })} style={{ background: 'none', border: '1px solid #e2e8f0', borderRadius: 7, padding: '5px 12px', fontSize: 12, fontWeight: 600, cursor: 'pointer', color: '#0f172a' }}>Review →</button>
                           </td>
                         </tr>
                       ))}
@@ -1109,7 +1109,7 @@ export default function App() {
                       </div>
                       <div style={{ display: 'flex', gap: 10 }}>
                         <button onClick={() => handleGateDecision(item.gate_id, 'REJECTED')} style={{ background: '#fef2f2', color: '#dc2626', border: '1px solid #fecaca', padding: '8px 16px', borderRadius: 8, fontSize: 13, fontWeight: 600, cursor: 'pointer' }}>Reject</button>
-                        <button onClick={() => setReviewModalItem({ invoice_number: item.invoice_number||'INV', supplier_name: item.supplier_name||'Vendor', issue: item.mismatch_type||'MISMATCH', itc_risk: item.itc_exposure_rupees||0, confidence: 'High', gate_id: item.gate_id, agent_a_code: item.root_cause_classification||'UNKNOWN', agent_a_reason: item.agent_a_reasoning||'Classified by statutory fallback engine.', agent_b_verdict: item.agent_b_verdict||'AGREE', agent_b_critique: item.agent_b_critique||'Cross-examination confirms.' })} style={{ background: '#059669', color: '#fff', border: 'none', padding: '8px 20px', borderRadius: 8, fontSize: 13, fontWeight: 700, cursor: 'pointer' }}>Review & Decide →</button>
+                        <button onClick={() => setReviewModalItem({ invoice_number: item.invoice_number||'INV', supplier_name: item.supplier_name||'Vendor', issue: item.mismatch_type||'MISMATCH', itc_risk: item.itc_exposure_rupees||0, confidence: 'High', gate_id: item.gate_id, root_cause_code: item.root_cause_classification||item.root_cause_code||'UNKNOWN', root_cause_reason: item.details||'Classified by deterministic engine.' })} style={{ background: '#059669', color: '#fff', border: 'none', padding: '8px 20px', borderRadius: 8, fontSize: 13, fontWeight: 700, cursor: 'pointer' }}>Review & Decide →</button>
                       </div>
                     </div>
                   ))}
@@ -1462,7 +1462,7 @@ export default function App() {
             </div>
           </section>
 
-          {/* ─── WORKFLOW STEPPER BAR (Horizontal 6-Step RocketRide Pipeline) ─── */}
+          {/* ─── WORKFLOW STEPPER BAR (Horizontal 6-Step Resolution Pipeline) ─── */}
           <section style={{
             background: '#ffffff',
             border: '1px solid #e5eae7',
@@ -2077,10 +2077,8 @@ export default function App() {
                                 itc_risk: itcRisk,
                                 confidence: isHigh ? 'High' : 'Medium',
                                 gate_id: gateId,
-                                agent_a_code: item.root_cause_code || item.root_cause_classification || 'STATUTORY_RECONCILIATION',
-                                agent_a_reason: item.details || item.agent_a_reasoning || 'Classified by deterministic GST reconciliation engine.',
-                                agent_b_verdict: item.agent_b_verdict || (item.status === 'VERIFIED_RESOLVED' ? 'RESOLVED' : 'PENDING_REVIEW'),
-                                agent_b_critique: item.agent_b_critique || item.rule_citation || 'Statutory review under Rule 60 CGST.'
+                                root_cause_code: item.root_cause_code || item.root_cause_classification || 'STATUTORY_RECONCILIATION',
+                                root_cause_reason: item.details || 'Classified by deterministic GST reconciliation engine.'
                               })}
                               style={{
                                 background: 'none', border: 'none', color: '#0f172a',
@@ -2224,7 +2222,7 @@ export default function App() {
                   </div>
                 ) : (
                   <div style={{ fontSize: 12.5, color: '#14532d', lineHeight: 1.5 }}>
-                    {explanationData?.explanation || reviewModalItem.agent_a_reason || 'Reconciliation discrepancy detected. Vendor action required for statutory eligibility.'}
+                    {explanationData?.explanation || reviewModalItem.root_cause_reason || 'Reconciliation discrepancy detected. Vendor action required for statutory eligibility.'}
                   </div>
                 )}
               </div>

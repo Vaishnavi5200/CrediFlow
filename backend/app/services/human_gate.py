@@ -1,6 +1,6 @@
 """
 Human-in-the-Loop Gate — CrediFlow
-Evaluates the 4 trigger conditions and manages approval queue + audit trail.
+Evaluates compliance risk trigger conditions and manages the approval queue + immutable audit trail.
 """
 
 from __future__ import annotations
@@ -12,10 +12,10 @@ from typing import Any, Dict, List, Optional
 
 
 class HumanGateTrigger(str, Enum):
-    AGENT_DISAGREEMENT = "AGENT_DISAGREEMENT"
     LOW_CONFIDENCE = "LOW_CONFIDENCE"
     HIGH_ITC_EXPOSURE = "HIGH_ITC_EXPOSURE"
     MALFORMED_INPUT = "MALFORMED_INPUT"
+    AGENT_DISAGREEMENT = "AGENT_DISAGREEMENT"  # Kept for backward compatibility if cited
 
 
 class HumanDecision(str, Enum):
@@ -106,6 +106,10 @@ class HumanGateEntry:
         )
 
     def to_dict(self) -> Dict[str, Any]:
+        root_cause = (
+            self.pipeline_result.get("root_cause_code")
+            or self.mismatch_record.get("mismatch_type", "")
+        )
         return {
             "gate_id": self.gate_id,
             "mismatch_id": self.mismatch_id,
@@ -120,16 +124,14 @@ class HumanGateEntry:
             "itc_exposure_inr": self.mismatch_record.get("itc_exposure_rupees", 0),
             "supplier_name": self.mismatch_record.get("supplier_name", ""),
             "mismatch_type": self.mismatch_record.get("mismatch_type", ""),
-            "agent_a_code": self.pipeline_result.get("agent_a", {}).get("root_cause_code", ""),
-            "agent_b_verdict": self.pipeline_result.get("agent_b", {}).get("audit_verdict", ""),
+            "root_cause_code": root_cause,
             "audit_log": self.audit_log,
         }
 
 
 class HumanGate:
     """
-    In-memory approval queue and audit trail.
-    In production, replace the dict store with a database-backed repository.
+    In-memory approval queue and audit trail for compliance decisions.
     """
 
     def __init__(
@@ -139,50 +141,24 @@ class HumanGate:
     ):
         self.confidence_threshold = confidence_threshold
         self.high_value_threshold_inr = high_value_threshold_inr
-        self._queue: Dict[str, HumanGateEntry] = {}  # gate_id → entry
+        self._queue: Dict[str, HumanGateEntry] = {}
 
     def evaluate(
         self,
         mismatch_record: Dict[str, Any],
-        pipeline_result: Dict[str, Any],
+        pipeline_result: Optional[Dict[str, Any]] = None,
     ) -> Optional[HumanGateEntry]:
         """
-        Evaluate all 4 human gate triggers for a pipeline result.
-        If ANY trigger fires, create a HumanGateEntry and add to queue.
-        Returns the entry if queued, None if cleared for auto-dispatch.
-
-        Trigger conditions (from master prompt §5, verbatim):
-          1. Agent disagreement — Agent B verdict is DISAGREE or PARTIALLY_AGREE
-          2. Low confidence    — Agent A or Agent B confidence < threshold
-          3. High ITC exposure — ₹ exposure >= high_value_threshold_inr
-          4. Malformed input   — mismatch_type == MALFORMED_INPUT
+        Evaluate human risk gate triggers:
+          1. High ITC exposure — INR exposure >= high_value_threshold_inr
+          2. Low confidence — classification confidence < threshold
+          3. Malformed input — mismatch_type == MALFORMED_INPUT
         """
-        agent_a = pipeline_result.get("agent_a", {})
-        agent_b = pipeline_result.get("agent_b", {})
+        pipeline_result = pipeline_result or {}
         triggers: List[HumanGateTrigger] = []
         reasons: List[str] = []
 
-        # ── Trigger 1: Agent disagreement ─────────────────────────────────────
-        verdict = agent_b.get("audit_verdict", "UNKNOWN")
-        if verdict in ("DISAGREE", "PARTIALLY_AGREE"):
-            triggers.append(HumanGateTrigger.AGENT_DISAGREEMENT)
-            reasons.append(
-                f"Agent B disagreement: verdict={verdict}, "
-                f"Agent A code={agent_a.get('root_cause_code')}, "
-                f"Agent B code={agent_b.get('auditor_root_cause_code')}"
-            )
-
-        # ── Trigger 2: Low confidence ─────────────────────────────────────────
-        conf_a = float(agent_a.get("confidence", 0.0))
-        conf_b = float(agent_b.get("auditor_confidence", 0.0))
-        if conf_a < self.confidence_threshold or conf_b < self.confidence_threshold:
-            triggers.append(HumanGateTrigger.LOW_CONFIDENCE)
-            reasons.append(
-                f"Low confidence: Agent A={conf_a:.2f}, Agent B={conf_b:.2f} "
-                f"(threshold={self.confidence_threshold})"
-            )
-
-        # ── Trigger 3: High ITC exposure ──────────────────────────────────────
+        # ── Trigger 1: High ITC exposure ──────────────────────────────────────
         exposure = float(mismatch_record.get("itc_exposure_rupees", 0.0))
         if exposure >= self.high_value_threshold_inr:
             triggers.append(HumanGateTrigger.HIGH_ITC_EXPOSURE)
@@ -190,7 +166,15 @@ class HumanGate:
                 f"High ITC exposure: ₹{exposure:,.0f} ≥ threshold ₹{self.high_value_threshold_inr:,.0f}"
             )
 
-        # ── Trigger 4: Malformed / unrecognized input ─────────────────────────
+        # ── Trigger 2: Low confidence ─────────────────────────────────────────
+        conf = float(pipeline_result.get("confidence", 1.0))
+        if conf < self.confidence_threshold:
+            triggers.append(HumanGateTrigger.LOW_CONFIDENCE)
+            reasons.append(
+                f"Low confidence: {conf:.2f} (threshold={self.confidence_threshold})"
+            )
+
+        # ── Trigger 3: Malformed / unrecognized input ─────────────────────────
         if mismatch_record.get("mismatch_type") == "MALFORMED_INPUT":
             triggers.append(HumanGateTrigger.MALFORMED_INPUT)
             reasons.append(
@@ -198,7 +182,7 @@ class HumanGate:
             )
 
         if not triggers:
-            return None  # Auto-approve — cleared for dispatch
+            return None
 
         entry = HumanGateEntry(
             mismatch_id=mismatch_record.get("invoice_number", "UNKNOWN"),
@@ -209,8 +193,6 @@ class HumanGate:
         )
         self._queue[entry.gate_id] = entry
         return entry
-
-    # ── Queue operations ──────────────────────────────────────────────────────
 
     def get_pending(self) -> List[HumanGateEntry]:
         return [e for e in self._queue.values() if e.decision == HumanDecision.PENDING]

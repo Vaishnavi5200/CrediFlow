@@ -1,11 +1,11 @@
 """
 Audit Service — CrediFlow
-Coordinates the end-to-end audit process:
-  1. Ingestion & Deterministic Reconciliation (MOD-36 matching)
+Coordinates the end-to-end statutory compliance audit:
+  1. Ingestion & Deterministic Reconciliation (Rule 60 CGST matching)
   2. ITC Risk Exposure Quantification
-  3. AI-Driven Root-Cause Classification & Audit via RocketRideService
+  3. Deterministic Root-Cause Classification
   4. Human-in-the-Loop Risk Gate Evaluation
-  5. Bilingual Nudge Generation
+  5. Bilingual Nudge Generation (English & Hindi)
   6. Normalized Structured Response Mapping
 """
 
@@ -14,25 +14,22 @@ from __future__ import annotations
 import time
 from typing import Any, Dict, List, Optional
 from ..core.gst_reconciliation import GSTReconciliationEngine, InvoiceRecord, DiscrepancyResult
-from .rocketride_service import RocketRideService, PipelineAuditResult
 from .human_gate import HumanGate
 from .notice_generator import generate_bilingual_nudges
 
 
 class AuditService:
     """
-    Coordinates compliance audit workflows between the deterministic engine,
-    RocketRide AI pipeline, and human risk gate.
+    Coordinates compliance audit workflows between the deterministic GST reconciliation engine,
+    statutory explanation layer, and human risk gate.
     """
 
     def __init__(
         self,
         reconciliation_engine: Optional[GSTReconciliationEngine] = None,
-        rocketride_service: Optional[RocketRideService] = None,
         human_gate: Optional[HumanGate] = None,
     ):
         self.engine = reconciliation_engine or GSTReconciliationEngine(high_value_threshold=50000.0)
-        self.rocketride = rocketride_service or RocketRideService()
         self.gate = human_gate or HumanGate(confidence_threshold=0.85, high_value_threshold_inr=50000.0)
 
     async def execute_audit(
@@ -42,11 +39,11 @@ class AuditService:
         filter_invoices: Optional[List[str]] = None,
     ) -> Dict[str, Any]:
         """
-        Executes full audit pipeline and returns standardized CrediFlow result schema.
+        Executes statutory compliance audit and returns standardized CrediFlow result schema.
         """
         t0 = time.monotonic()
 
-        # Step 1 & 2: Deterministic Reconcile + ITC Quantification
+        # Step 1 & 2: Deterministic Reconciliation + ITC Exposure Quantification
         discrepancies = self.engine.reconcile(purchase_register, gstr_2b)
 
         if filter_invoices:
@@ -55,10 +52,8 @@ class AuditService:
         total_exposure = sum(d.itc_exposure_rupees for d in discrepancies)
         high_exposure_count = sum(1 for d in discrepancies if d.is_high_value)
 
-        # Step 3 & 4: Multi-Agent Audit via RocketRide
         findings = []
         evidence = []
-        engine_counts = {"ROCKETRIDE_WEBHOOK": 0, "ROCKETRIDE_CLOUD": 0, "STATUTORY_FALLBACK": 0}
 
         for d in discrepancies:
             m_dict = {
@@ -74,7 +69,7 @@ class AuditService:
                 "rule_citation": d.rule_citation,
                 "severity": d.severity.value,
                 "filing_period": d.id.split("-")[1] + "-" + d.id.split("-")[2] if "-" in d.id else "2026-04",
-                "hsn_code": "",  # Not stored in DiscrepancyResult; set by invoice record
+                "hsn_code": "",
             }
 
             # Recover actual taxable_value from purchase register for this invoice
@@ -85,11 +80,14 @@ class AuditService:
                 m_dict["filing_period"] = pr_invoice.filing_period
                 m_dict["hsn_code"] = pr_invoice.hsn_code
 
-            audit_res: PipelineAuditResult = await self.rocketride.audit_mismatch(m_dict)
-            engine_counts[audit_res.execution_engine] = engine_counts.get(audit_res.execution_engine, 0) + 1
-
             # Evaluate Human Gate
-            gate_entry = self.gate.evaluate(m_dict, audit_res.to_dict())
+            pipeline_result = {
+                "root_cause_code": d.mismatch_type.value,
+                "confidence": 0.95,
+                "reasoning": d.details,
+                "rule_citation": d.rule_citation,
+            }
+            gate_entry = self.gate.evaluate(m_dict, pipeline_result)
 
             # Generate bilingual nudge previews using accurate invoice data
             nudges = generate_bilingual_nudges(
@@ -99,8 +97,11 @@ class AuditService:
                 taxable_value=actual_taxable_value,
                 itc_exposure=d.itc_exposure_rupees,
                 mismatch_type=d.mismatch_type.value,
-                root_cause_code=audit_res.agent_a.root_cause_code
+                root_cause_code=d.mismatch_type.value,
             )
+
+            requires_human_review = gate_entry is not None
+            reasons = gate_entry.trigger_reasons if gate_entry else []
 
             findings.append({
                 "invoice_number": d.invoice_number,
@@ -108,19 +109,16 @@ class AuditService:
                 "supplier_gstin": d.supplier_gstin,
                 "itc_exposure_rupees": d.itc_exposure_rupees,
                 "mismatch_type": d.mismatch_type.value,
-                "execution_engine": audit_res.execution_engine,
-                "agent_a": audit_res.agent_a.raw,
-                "agent_b": audit_res.agent_b.raw,
-                "requires_human_review": audit_res.requires_human_review,
+                "execution_engine": "DETERMINISTIC_RULE_60",
+                "root_cause_code": d.mismatch_type.value,
+                "requires_human_review": requires_human_review,
                 "human_review_triggers": {
-                    "agent_disagreement": audit_res.trigger_agent_disagreement,
-                    "low_confidence": audit_res.trigger_low_confidence,
-                    "high_exposure": audit_res.trigger_high_exposure,
-                    "malformed_input": audit_res.trigger_malformed
+                    "high_exposure": d.is_high_value,
+                    "malformed_input": d.mismatch_type.value == "MALFORMED_INPUT",
                 },
-                "human_review_reasons": audit_res.human_review_reasons,
+                "human_review_reasons": reasons,
                 "gate_id": gate_entry.gate_id if gate_entry else None,
-                "nudge_preview": nudges
+                "nudge_preview": nudges,
             })
 
             evidence.append({
@@ -128,18 +126,11 @@ class AuditService:
                 "purchase_register_tax": d.purchase_register_tax,
                 "gstr_2b_tax": d.gstr_2b_tax,
                 "rule_citation": d.rule_citation,
-                "agent_a_reasoning": audit_res.agent_a.reasoning,
-                "agent_b_cross_examination": audit_res.agent_b.cross_examination,
-                "consensus": audit_res.agent_b.audit_verdict
+                "details": d.details,
+                "reconciliation_outcome": d.reconciliation_outcome,
             })
 
         wall_clock_ms = (time.monotonic() - t0) * 1000
-        if engine_counts.get("ROCKETRIDE_WEBHOOK", 0) > 0:
-            overall_engine = "ROCKETRIDE_WEBHOOK"
-        elif engine_counts.get("ROCKETRIDE_CLOUD", 0) > 0:
-            overall_engine = "ROCKETRIDE_CLOUD"
-        else:
-            overall_engine = "STATUTORY_FALLBACK"
         human_review_required = self.gate.pending_count > 0 or any(f["requires_human_review"] for f in findings)
 
         # Risk Level Assessment
@@ -160,7 +151,7 @@ class AuditService:
             "risk_level": risk_level,
             "human_review_required": human_review_required,
             "human_gate_pending": self.gate.pending_count,
-            "execution_engine": overall_engine,
+            "execution_engine": "DETERMINISTIC_RULE_60",
             "wall_clock_ms": round(wall_clock_ms, 2),
             "summary": {
                 "purchase_register_count": len(purchase_register),
@@ -169,5 +160,5 @@ class AuditService:
                 "total_itc_exposure_rupees": total_exposure,
             },
             "findings": findings,
-            "evidence": evidence
+            "evidence": evidence,
         }

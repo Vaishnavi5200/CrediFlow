@@ -1,6 +1,6 @@
 """
 CrediFlow FastAPI API Routes
-Provides endpoints for Deterministic Ingestion, RocketRide Dual-Agent Audit,
+Provides endpoints for Deterministic Ingestion, Statutory Compliance Audit,
 Human-in-the-Loop Gate, PDF/Bilingual Nudge Dispatch, and Closed-Loop Resolution.
 """
 
@@ -23,7 +23,6 @@ from ..core.synthetic_data_generator import (
     SAMPLE_VENDORS,
     BUYER_GSTIN,
 )
-from ..services.rocketride_service import RocketRideService
 from ..services.human_gate import HumanGate, HumanDecision
 from ..services.notice_generator import generate_pdf_notice, generate_bilingual_nudges
 from ..services.nudge_dispatcher import NudgeDispatcher
@@ -36,13 +35,11 @@ router = APIRouter(prefix="/api")
 
 # Singleton Services
 engine = GSTReconciliationEngine(high_value_threshold=50000.0)
-rocketride_svc = RocketRideService()
 gate = HumanGate(confidence_threshold=0.85, high_value_threshold_inr=50000.0)
 dispatcher = NudgeDispatcher()
 ai_explanation_svc = AIExplanationService()
 audit_svc = AuditService(
     reconciliation_engine=engine,
-    rocketride_service=rocketride_svc,
     human_gate=gate
 )
 
@@ -340,9 +337,9 @@ async def upload_and_reconcile(
 
 
 @router.post("/audit")
-async def run_multi_agent_audit(req: Optional[AuditRequest] = None):
+async def run_statutory_audit(req: Optional[AuditRequest] = None):
     """
-    Runs the RocketRide dual-agent audit (Agent A Classifier + Agent B Cross-Examiner)
+    Runs the deterministic statutory compliance audit
     through AuditService, routing through the Human Gate.
     """
     if not STATE["purchase_register"] or not STATE["gstr_2b_records"]:
@@ -1076,13 +1073,11 @@ def run_batch_benchmarks(count: int = Query(1000, ge=50, le=2000)):
     # Human gate cases: High exposure (>=50k) or malformed
     human_review_count = sum(1 for d in batch_discs if d.itc_exposure_rupees >= 50000.0 or d.mismatch_type.value == "MALFORMED_INPUT")
 
-    # NOTE: Token & cost figures below are ESTIMATES based on GPT-4o-mini pricing
-    # (~650 tokens per dual-agent audit: Agent A ~320, Agent B ~330).
-    # Real token usage depends on RocketRide Cloud live session; these figures
-    # are provided as cost planning estimates, NOT measured values.
-    estimated_tokens_per_disc = 650
+    # NOTE: Token & cost figures below are ESTIMATES based on LLM explanation pricing.
+    # Estimated tokens per discrepancy explanation (~350 tokens).
+    estimated_tokens_per_disc = 350
     total_tokens = len(batch_discs) * estimated_tokens_per_disc
-    # GPT-4o-mini: ~$0.15/1M input + $0.60/1M output ≈ $0.0003/1k tokens blended
+    # GPT-4o-mini / Gemini Flash estimation: ~$0.0003/1k tokens blended
     cost_usd = round((total_tokens / 1000) * 0.0003, 4)
     cost_inr = round(cost_usd * 86.5, 2)
     cost_per_record_usd = round(cost_usd / max(count, 1), 6)
@@ -1128,7 +1123,7 @@ def run_batch_benchmarks(count: int = Query(1000, ge=50, le=2000)):
         "cost_inr": cost_inr,
         "estimated_cost_per_record_usd": cost_per_record_usd,
         "cost_per_record_usd": cost_per_record_usd,
-        "cost_basis": "ESTIMATE: GPT-4o-mini pricing ~$0.0003/1k tokens. Actual cost depends on RocketRide Cloud live execution.",
+        "cost_basis": "ESTIMATE: AI Explanation Layer pricing ~$0.0003/1k tokens for vendor nudge generation.",
         "mismatch_distribution": by_type,
         "resilience_summary": f"{count} processed · {malformed_count} malformed · {human_review_count} human review",
         "zero_llm_math_verified": True

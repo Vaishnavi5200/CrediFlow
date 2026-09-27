@@ -27,24 +27,16 @@ CrediFlow turns this into a **sub-100ms automated workflow**.
 ## Core Workflow
 
 ```
-Upload PR + GSTR-2B
-        ↓
-Deterministic Reconciliation (GSTReconciliationEngine)
-        ↓
 Mismatch Detected
-        ↓
-Generate Bilingual Nudge (English + Hindi)
-        ↓
-Try WhatsApp Business API
-        ↙          ↘
-   SUCCESS        FAILURE
-   Nudged      wa.me fallback
-        ↓
-Vendor Amendment → Pending Verification
-        ↓
-SAME Reconciliation Engine Re-runs
-        ↓
-Verified (ITC → ₹0 only after engine confirms match)
+→ Existing deterministic result
+→ Existing English + Hindi nudge
+→ Try WhatsApp Business API
+→ SUCCESS → Status = Nudged
+→ FAILURE → wa.me fallback
+→ Vendor Amendment
+→ Pending Verification
+→ SAME Reconciliation Engine re-runs
+→ Verified only after successful reconciliation
 ```
 
 ---
@@ -52,36 +44,49 @@ Verified (ITC → ₹0 only after engine confirms match)
 ## Architecture
 
 ```
-┌─────────────────────────────────────────────────────────────────────────┐
-│                         CrediFlow System                                │
-│                                                                         │
-│  ┌────────────────┐    ┌──────────────────────────────────────────────┐ │
-│  │   React / Vite │    │              FastAPI Backend                 │ │
-│  │   Frontend     │◄──►│                                              │ │
-│  │   (Port 5173)  │    │  ┌────────────────────────────────────────┐ │ │
-│  └────────────────┘    │  │  GSTReconciliationEngine (SINGLE SOT)  │ │ │
-│                        │  │  • Exact match  • Tolerant (≤₹2)       │ │ │
-│                        │  │  • Near-match   • Tax-head mismatch    │ │ │
-│                        │  │  • Missing in 2B                       │ │ │
-│                        │  └────────────────────────────────────────┘ │ │
-│                        │  ┌────────────┐  ┌───────────────────────┐  │ │
-│                        │  │ RocketRide │  │  AI Explanation Svc   │  │ │
-│                        │  │ Agent A/B  │  │  (Gemini / OpenAI /   │  │ │
-│                        │  │ Audit pipe │  │   Deterministic fb)   │  │ │
-│                        │  └────────────┘  └───────────────────────┘  │ │
-│                        │  ┌─────────────────────────────────────────┐ │ │
-│                        │  │       WhatsApp Delivery Service          │ │ │
-│                        │  │  API (primary) → wa.me fallback         │ │ │
-│                        │  └─────────────────────────────────────────┘ │ │
-│                        │  SQLite audit trail  │  ReportLab PDF notices │ │
-│                        └──────────────────────────────────────────────┘ │
-└─────────────────────────────────────────────────────────────────────────┘
+React / Vite Frontend
+        │
+        ▼
+FastAPI Backend
+        │
+        ▼
+GSTReconciliationEngine
+(SINGLE SOURCE OF TRUTH)
+        │
+ ┌──────┴──────────┐
+ │                 │
+ ▼                 ▼
+AI Explanation     WhatsApp
+Service            Delivery Service
+ │                 │
+ │                 ├─ WhatsApp Business API
+ │                 └─ wa.me fallback
+ │
+ ▼
+SQLite Audit Ledger
+ │
+ ▼
+Reports / PDF
 ```
 
-**Critical design invariants:**
-- `GSTReconciliationEngine` is the single source of truth — no LLM ever changes ITC, root cause, or match outcome
-- WhatsApp delivery changes communication state only — never financial state
-- ITC becomes ₹0 only after successful re-reconciliation, not on vendor amendment or message send
+### Critical Design Invariants:
+- **`GSTReconciliationEngine` alone owns:**
+  - Invoice matching (exact, tolerance ≤₹2, near-match, tax-head, missing)
+  - ITC calculation & blocked tax exposure
+  - Root cause determination
+  - Reconciliation outcome & status transitions
+  - Verification & re-reconciliation
+- **AI Explanation Service only:**
+  - Explains deterministic results with statutory references
+  - Generates bilingual vendor nudges (English + Hindi)
+  - Full deterministic fallback if external LLM APIs are unavailable
+- **WhatsApp Delivery Service only:**
+  - Delivers the generated nudge via Meta WhatsApp Business Cloud API (primary)
+  - Automatically provides pre-filled `wa.me` deep-link fallback on any delivery failure
+  - Records communication status (`NUDGED`) without modifying financial state
+- **ITC Recovery Guarantee:**
+  - ITC drops to ₹0 **only** when `GSTReconciliationEngine` re-runs and confirms match
+  - Vendor amendment triggers `PENDING_VERIFICATION`, never automatic resolution
 
 ---
 
@@ -89,15 +94,14 @@ Verified (ITC → ₹0 only after engine confirms match)
 
 | Layer | Technology |
 |---|---|
-| Frontend | React 19, Vite 8, Lucide React |
+| Frontend | React 19, Vite, Lucide React |
 | Backend | FastAPI 0.115, Python 3.10+, Uvicorn |
-| Reconciliation | Pure Python deterministic engine (zero LLM arithmetic) |
-| AI Explanation | Gemini Flash / OpenAI GPT-4o-mini (with full deterministic fallback) |
-| Audit Pipeline | RocketRide Cloud (Agent A: Classifier + Agent B: Cross-Examiner) |
-| WhatsApp | Meta WhatsApp Business Cloud API v20.0 + wa.me fallback |
-| PDF | ReportLab |
-| Database | SQLite (audit trail) |
-| Deployment | Vercel (frontend + serverless API) |
+| Reconciliation Engine | Pure Python deterministic engine (zero LLM arithmetic) |
+| AI Explanation | Gemini Flash / Groq / OpenAI GPT-4o-mini (with full deterministic fallback) |
+| WhatsApp Delivery | Meta WhatsApp Business Cloud API v20.0 + wa.me fallback |
+| Reports & Notices | ReportLab PDF generator |
+| Database & Audit | SQLite (immutable audit ledger) |
+| Deployment | Vercel (frontend static bundle + serverless ASGI backend) |
 
 ---
 
@@ -141,12 +145,9 @@ npm run dev
 Copy `.env.example` to `.env` and configure:
 
 ```bash
-# ── RocketRide Pipeline (AI audit — optional) ─────────────────────────────────
-ROCKETRIDE_WEBHOOK_URL=https://staging.rocketride.ai/webhook/...
-ROCKETRIDE_WEBHOOK_TOKEN=rr_your_private_token_here
-
 # ── LLM Provider (optional — for AI explanation) ─────────────────────────────
 GEMINI_API_KEY=AIza...           # OR
+GROQ_API_KEY=gsk_...             # OR
 OPENAI_API_KEY=sk-proj-...
 
 # ── WhatsApp Business API (optional — primary delivery channel) ───────────────
@@ -176,7 +177,7 @@ CONFIDENCE_THRESHOLD=0.85
 CrediFlow uses a **primary API → automatic wa.me fallback** pattern:
 
 1. When a mismatch is detected and the nudge is dispatched, `POST /api/whatsapp/send` is called
-2. The backend generates the existing bilingual nudge (English + Hindi) using the AI service (or deterministic fallback)
+2. The backend generates the bilingual nudge (English + Hindi) using the AI service (or statutory fallback)
 3. **If `WHATSAPP_API_TOKEN` and `WHATSAPP_PHONE_NUMBER_ID` are set** → message is sent via Meta WhatsApp Business Cloud API → `communication_status: NUDGED`
 4. **On any failure** (unconfigured, timeout, rate-limit, invalid phone, bad credentials) → returns a pre-filled `wa.me` URL → frontend opens it as a new tab automatically
 
@@ -204,7 +205,7 @@ No code changes are required to switch between API mode and wa.me fallback.
 | `/api/reconcile` | POST | Run deterministic reconciliation on demo dataset |
 | `/api/reconcile-custom` | POST | Reconcile custom PR + GSTR-2B (JSON body) |
 | `/api/upload-and-reconcile` | POST | Upload CSV/XLSX/JSON files and reconcile |
-| `/api/audit` | POST | Run RocketRide dual-agent audit (A + B) |
+| `/api/audit` | POST | Run statutory compliance audit |
 | `/api/explain` | POST | AI explanation for a reconciliation result |
 | `/api/discrepancy/explain` | POST | Explanation + bilingual nudge for an invoice |
 | `/api/nudge/dispatch` | POST | Dispatch PDF + email notice |
@@ -225,12 +226,12 @@ Full interactive docs: `http://localhost:8000/docs`
 
 1. **Open** `http://localhost:5173`
 2. **Run Reconciliation** → 45 demo invoices loaded; 5 mismatches detected (₹70,580 ITC at risk)
-3. **Run Audit** → Agent A classifies root cause; Agent B cross-examines
-4. **Open Human Gate** → Review flagged high-value invoices
+3. **Run Audit** → Deterministic Rule 60 compliance check & risk quantification
+4. **Open Human Gate** → Review flagged high-value invoices (>= ₹50,000 exposure)
 5. **Dispatch Nudge** → PDF generated; WhatsApp API attempted; wa.me fallback if unconfigured
-6. **Simulate Amendment** → Invoice status → PENDING_VERIFICATION
+6. **Simulate Amendment** → Invoice status → `PENDING_VERIFICATION`
 7. **Verify** → Same engine re-runs; ITC drops to ₹0 only on confirmed match
-8. **Vendor Scorecards** → VCS formula: 100 − (0.45·S_exposure + 0.35·S_frequency + 0.20·S_aging)
+8. **Vendor Scorecards** → VCS formula: `100 − (0.45·S_exposure + 0.35·S_frequency + 0.20·S_aging)`
 
 ---
 
@@ -251,9 +252,8 @@ CrediFlow/
 │   │   ├── services/
 │   │   │   ├── whatsapp_delivery_service.py  # WhatsApp API + wa.me fallback
 │   │   │   ├── ai_explanation_service.py     # Gemini/OpenAI + deterministic fallback
-│   │   │   ├── rocketride_service.py         # Agent A/B audit pipeline
-│   │   │   ├── audit_service.py
-│   │   │   ├── human_gate.py
+│   │   │   ├── audit_service.py              # Compliance audit coordinator
+│   │   │   ├── human_gate.py                 # Human-in-the-loop risk gate
 │   │   │   ├── notice_generator.py           # Bilingual nudges + ReportLab PDF
 │   │   │   └── nudge_dispatcher.py
 │   │   └── main.py
@@ -271,9 +271,6 @@ CrediFlow/
 │
 ├── api/
 │   └── index.py                     # Vercel serverless ASGI entry point
-│
-├── pipelines/
-│   └── crediflow_audit.pipe         # RocketRide Agent A + B pipeline definition
 │
 ├── data/                            # Runtime-generated (gitignored)
 │   ├── crediflow.db                 # SQLite audit trail

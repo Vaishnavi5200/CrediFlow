@@ -14,7 +14,6 @@ from backend.app.core.gst_reconciliation import (
     normalize_invoice_num,
 )
 from backend.app.core.synthetic_data_generator import generate_demo_dataset
-from backend.app.services.rocketride_service import RocketRideService
 from backend.app.services.human_gate import HumanGate
 from backend.app.services.audit_service import AuditService
 
@@ -221,7 +220,7 @@ def test_vcs_tier_boundaries():
 
 @pytest.mark.asyncio
 async def test_hitl_triggers_on_low_confidence():
-    """HITL must trigger when Agent B confidence is below threshold (0.85)."""
+    """HITL must trigger when classification confidence is below threshold (0.85)."""
     gate = HumanGate(confidence_threshold=0.85, high_value_threshold_inr=50000.0)
     mismatch = {
         "invoice_number": "VTX-4412",
@@ -230,17 +229,11 @@ async def test_hitl_triggers_on_low_confidence():
         "itc_exposure_rupees": 1080.0,
         "mismatch_type": "HSN_MISMATCH"
     }
-    # Simulate Agent B returning 0.74 confidence (HSN mismatch fallback)
     audit_dict = {
         "mismatch_id": "VTX-4412",
+        "confidence": 0.74,
         "requires_human_review": True,
-        "human_review_reasons": ["Low confidence: Agent A=0.91, Agent B=0.74 (threshold=0.85)"],
-        "human_review_triggers": {
-            "agent_disagreement": True,
-            "low_confidence": True,
-            "high_exposure": False,
-            "malformed_input": False,
-        }
+        "human_review_reasons": ["Low confidence: 0.74 (threshold=0.85)"],
     }
     entry = gate.evaluate(mismatch, audit_dict)
     assert entry is not None
@@ -248,26 +241,20 @@ async def test_hitl_triggers_on_low_confidence():
 
 
 @pytest.mark.asyncio
-async def test_hitl_triggers_on_agent_disagreement():
-    """HITL must trigger on PARTIALLY_AGREE verdict."""
+async def test_hitl_triggers_on_high_exposure():
+    """HITL must trigger on high exposure (>= 50,000 INR)."""
     gate = HumanGate(confidence_threshold=0.85, high_value_threshold_inr=50000.0)
     mismatch = {
         "invoice_number": "ZLOG-9923",
         "supplier_name": "Zenith Logistics Corp",
         "supplier_gstin": "29AAACZ3456G1Z3",
-        "itc_exposure_rupees": 13500.0,
+        "itc_exposure_rupees": 55000.0,
         "mismatch_type": "GSTIN_MISMATCH"
     }
     audit_dict = {
         "mismatch_id": "ZLOG-9923",
         "requires_human_review": True,
-        "human_review_reasons": ["Agent disagreement: Agent B verdict = PARTIALLY_AGREE"],
-        "human_review_triggers": {
-            "agent_disagreement": True,
-            "low_confidence": True,
-            "high_exposure": False,
-            "malformed_input": False,
-        }
+        "human_review_reasons": ["High ITC exposure: ₹55,000 ≥ ₹50,000"],
     }
     entry = gate.evaluate(mismatch, audit_dict)
     assert entry is not None
@@ -281,9 +268,8 @@ async def test_audit_service_returns_results_key():
     """AuditService.execute_audit must return 'findings' key (not 'results')."""
     pr, g2b = generate_demo_dataset()
     engine = GSTReconciliationEngine()
-    rocketride_svc = RocketRideService()
     gate = HumanGate()
-    audit_svc = AuditService(engine, rocketride_svc, gate)
+    audit_svc = AuditService(engine, gate)
 
     result = await audit_svc.execute_audit(pr, g2b)
     assert "findings" in result, "Missing 'findings' key in audit output"
@@ -291,39 +277,34 @@ async def test_audit_service_returns_results_key():
 
 
 @pytest.mark.asyncio
-async def test_audit_service_fallback_hitl_triggered():
+async def test_audit_service_high_exposure_hitl_triggered():
     """
-    In fallback mode, HSN and GSTIN mismatches should produce PARTIALLY_AGREE
-    verdicts (confidence < 0.85), which means requires_human_review = True.
+    In demo dataset, invoices with exposure >= 50,000 must trigger requires_human_review = True.
     """
     pr, g2b = generate_demo_dataset()
     engine = GSTReconciliationEngine()
-    rocketride_svc = RocketRideService()
-    gate = HumanGate(confidence_threshold=0.85)
-    audit_svc = AuditService(engine, rocketride_svc, gate)
+    gate = HumanGate(high_value_threshold_inr=40000.0)
+    audit_svc = AuditService(engine, gate)
 
     result = await audit_svc.execute_audit(pr, g2b)
-    # HSN and GSTIN mismatches should trigger HITL in fallback mode
     human_review_cases = [
         f for f in result["findings"]
-        if f.get("requires_human_review") or f.get("audit_verdict") in ("PARTIALLY_AGREE", "DISAGREE")
+        if f.get("requires_human_review")
     ]
-    assert len(human_review_cases) >= 2, (
-        f"Expected at least 2 HITL cases (HSN + GSTIN), got {len(human_review_cases)}"
+    assert len(human_review_cases) >= 1, (
+        f"Expected at least 1 high-exposure HITL case, got {len(human_review_cases)}"
     )
 
 
 @pytest.mark.asyncio
 async def test_audit_nudge_taxable_value_is_accurate():
     """
-    Nudge preview taxable_value must match actual invoice taxable_value,
-    NOT be inflated with any artificial offset.
+    Nudge preview taxable_value must match actual invoice taxable_value.
     """
     pr, g2b = generate_demo_dataset()
     engine = GSTReconciliationEngine()
-    rocketride_svc = RocketRideService()
     gate = HumanGate()
-    audit_svc = AuditService(engine, rocketride_svc, gate)
+    audit_svc = AuditService(engine, gate)
 
     result = await audit_svc.execute_audit(pr, g2b)
 

@@ -1,11 +1,10 @@
 """
-Unit Tests for CrediFlow Audit & RocketRide Services
+Unit Tests for CrediFlow Audit & Human Risk Gate Services
 """
 
 import pytest
 from backend.app.core.gst_reconciliation import GSTReconciliationEngine, InvoiceRecord, MismatchType
 from backend.app.core.synthetic_data_generator import generate_demo_dataset
-from backend.app.services.rocketride_service import RocketRideService
 from backend.app.services.human_gate import HumanGate
 from backend.app.services.audit_service import AuditService
 
@@ -25,12 +24,11 @@ def test_deterministic_reconciliation_math():
 
 @pytest.mark.asyncio
 async def test_audit_service_execution():
-    """Verify AuditService orchestrates dual-agent audit and returns normalized schema."""
+    """Verify AuditService orchestrates statutory audit and returns normalized schema."""
     pr, g2b = generate_demo_dataset()
     engine = GSTReconciliationEngine(high_value_threshold=50000.0)
-    rocketride_svc = RocketRideService()
     gate = HumanGate()
-    audit_svc = AuditService(engine, rocketride_svc, gate)
+    audit_svc = AuditService(engine, gate)
 
     result = await audit_svc.execute_audit(pr, g2b)
 
@@ -45,7 +43,7 @@ async def test_audit_service_execution():
 
 @pytest.mark.asyncio
 async def test_human_gate_trigger_evaluation():
-    """Verify Human Gate triggers on high value, low confidence, or agent disagreement."""
+    """Verify Human Gate triggers on high value or low confidence."""
     gate = HumanGate(confidence_threshold=0.85, high_value_threshold_inr=50000.0)
     mismatch = {
         "invoice_number": "INV-TEST",

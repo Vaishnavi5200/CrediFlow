@@ -1,9 +1,8 @@
 """
 CrediFlow Buildathon Compliance Test Suite
-Tests all 17 requirements:
+Tests all key system requirements:
 - Multi-format file ingestion (CSV, XLSX, JSON, malformed rows)
-- Deterministic reconciliation & zero LLM arithmetic
-- Dual-Agent A/B consensus, disagreement & independent evidence
+- Deterministic reconciliation & zero LLM arithmetic (Rule 60 CGST)
 - Human Gate enforcement (Approve, Edit, Reject blocking dispatch)
 - Real-world action verification (SQLite DB persistence & ReportLab PDF on disk)
 - 1,000-invoice batch performance & cost calculations
@@ -20,7 +19,6 @@ from backend.app.services.human_gate import HumanGate, HumanDecision
 from backend.app.services.notice_generator import generate_pdf_notice
 from backend.app.services.nudge_dispatcher import NudgeDispatcher
 from backend.app.core.db import get_db_summary, log_benchmark_run, log_human_decision, log_notice_dispatch, DB_PATH
-from backend.app.services.rocketride_service import RocketRideService, AgentAResult, AgentBResult, PipelineAuditResult
 
 
 def test_file_parser_csv_json_and_malformed():
@@ -75,55 +73,40 @@ def test_batch_processing_1000_records():
     assert elapsed_ms < 500.0
 
     # Calculate token and cost
-    total_tokens = len(discrepancies) * 650
+    total_tokens = len(discrepancies) * 350
     cost_usd = round((total_tokens / 1000) * 0.0003, 4)
     assert cost_usd < 0.10  # Highly affordable batch processing
     assert all(d.itc_exposure_rupees >= 0.0 for d in discrepancies)
 
 
-def test_multi_agent_consensus_and_disagreement():
-    """Requirement 5 & 7: Agent A and Agent B independent audit and disagreement trigger."""
-    agent_a_good = AgentAResult(
-        raw={"root_cause_code": "B2B_FILED_AS_B2C", "confidence": 0.95, "reasoning": "Missing from GSTR-2B"},
-        latency_ms=120.0, tokens=320, source="STATUTORY_FALLBACK"
-    )
-    agent_b_agree = AgentBResult(
-        raw={"audit_verdict": "AGREE", "auditor_confidence": 0.92, "independent_analysis": "Confirmed missing"},
-        latency_ms=115.0, tokens=330, source="STATUTORY_FALLBACK"
-    )
+def test_deterministic_reconciliation_and_hitl_triggers():
+    """Requirement 5 & 7: Deterministic reconciliation and Human Risk Gate evaluation."""
+    gate = HumanGate(confidence_threshold=0.85, high_value_threshold_inr=50000.0)
 
-    result_agree = PipelineAuditResult(
-        mismatch_id="INV-001",
-        agent_a=agent_a_good,
-        agent_b=agent_b_agree,
-        itc_exposure_inr=15000.0,
-        is_malformed=False,
-        total_latency_ms=235.0,
-        total_tokens=650,
-        execution_engine="STATUTORY_FALLBACK"
+    # Low exposure case (< 50,000 INR)
+    entry_low = gate.evaluate(
+        mismatch_record={
+            "invoice_number": "INV-001",
+            "supplier_name": "Rajesh Traders",
+            "itc_exposure_rupees": 15000.0,
+            "mismatch_type": "MISSING_IN_2B"
+        },
+        pipeline_result={"confidence": 0.95}
     )
-    # Low exposure + consensus + high confidence = does not strictly require human review
-    assert not result_agree.trigger_agent_disagreement
-    assert not result_agree.requires_human_review
+    assert entry_low is None  # Auto-approved
 
-    # Disagreement case
-    agent_b_disagree = AgentBResult(
-        raw={"audit_verdict": "DISAGREE", "auditor_confidence": 0.88, "independent_analysis": "Actually timing variance"},
-        latency_ms=110.0, tokens=330, source="STATUTORY_FALLBACK"
+    # High exposure case (>= 50,000 INR)
+    entry_high = gate.evaluate(
+        mismatch_record={
+            "invoice_number": "INV-002",
+            "supplier_name": "Rajesh Traders",
+            "itc_exposure_rupees": 65000.0,
+            "mismatch_type": "MISSING_IN_2B"
+        },
+        pipeline_result={"confidence": 0.95}
     )
-    result_disagree = PipelineAuditResult(
-        mismatch_id="INV-002",
-        agent_a=agent_a_good,
-        agent_b=agent_b_disagree,
-        itc_exposure_inr=15000.0,
-        is_malformed=False,
-        total_latency_ms=230.0,
-        total_tokens=650,
-        execution_engine="STATUTORY_FALLBACK"
-    )
-    assert result_disagree.trigger_agent_disagreement
-    assert result_disagree.requires_human_review
-    assert any("Agent disagreement" in r for r in result_disagree.human_review_reasons)
+    assert entry_high is not None
+    assert any("High ITC exposure" in r for r in entry_high.trigger_reasons)
 
 
 def test_human_gate_blocks_rejected_notice():
@@ -137,8 +120,7 @@ def test_human_gate_blocks_rejected_notice():
             "mismatch_type": "MISSING_IN_2B"
         },
         pipeline_result={
-            "agent_a": {"root_cause_code": "MISSING_IN_2B", "confidence": 0.95},
-            "agent_b": {"audit_verdict": "AGREE", "auditor_confidence": 0.92}
+            "confidence": 0.95
         }
     )
     assert entry is not None
