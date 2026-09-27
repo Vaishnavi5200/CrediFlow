@@ -405,10 +405,12 @@ export default function App() {
     }
   };
 
-  // Dispatch Nudge
+  // Dispatch Nudge — primary: WhatsApp Business API; fallback: wa.me link
   const handleDispatchNudge = async (invoiceNumber) => {
     try {
       setLoading(true);
+
+      // 1. Dispatch PDF + email notice (existing flow, unchanged)
       const res = await fetch(`${API_BASE}/nudge/dispatch`, {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
@@ -419,7 +421,35 @@ export default function App() {
       });
       const data = await res.json();
       setActionStatus(prev => ({ ...prev, pdfGenerated: true, noticeDispatched: true }));
-      showNotification(`Dispatched Rule 60 Statutory Notice for ${invoiceNumber}`, 'success');
+
+      // 2. Attempt WhatsApp delivery: try Business API first, fall back to wa.me
+      // NOTE: WhatsApp sending only changes communication state — never reconciliation/ITC/status
+      try {
+        const waRes = await fetch(`${API_BASE}/whatsapp/send`, {
+          method: 'POST',
+          headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify({ invoice_number: invoiceNumber })
+        });
+        if (waRes.ok) {
+          const waData = await waRes.json();
+          if (waData.delivery_method === 'WHATSAPP_API' && waData.communication_status === 'NUDGED') {
+            // API delivery succeeded — status: Nudged
+            showNotification(`✅ WhatsApp sent via API. Vendor Nudged for ${invoiceNumber}`, 'success');
+          } else if (waData.wame_url) {
+            // API unavailable/failed — open wa.me fallback so user can send manually
+            showNotification(`Dispatched Rule 60 Statutory Notice for ${invoiceNumber}`, 'success');
+            window.open(waData.wame_url, '_blank', 'noopener,noreferrer');
+          } else {
+            showNotification(`Dispatched Rule 60 Statutory Notice for ${invoiceNumber}`, 'success');
+          }
+        } else {
+          // /whatsapp/send itself errored (should not happen) — show existing success msg
+          showNotification(`Dispatched Rule 60 Statutory Notice for ${invoiceNumber}`, 'success');
+        }
+      } catch (_waErr) {
+        // WhatsApp send network error — does NOT break reconciliation, show original success
+        showNotification(`Dispatched Rule 60 Statutory Notice for ${invoiceNumber}`, 'success');
+      }
 
       // Refresh db summary
       const dbRes = await fetch(`${API_BASE}/db/summary`);

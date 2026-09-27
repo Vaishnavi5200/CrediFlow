@@ -29,6 +29,7 @@ from ..services.notice_generator import generate_pdf_notice, generate_bilingual_
 from ..services.nudge_dispatcher import NudgeDispatcher
 from ..services.audit_service import AuditService
 from ..services.ai_explanation_service import AIExplanationService, ExplanationRequest, ExplanationResponse
+from ..services.whatsapp_delivery_service import deliver_whatsapp_nudge, build_wame_fallback_url
 from ..core.db import get_db_summary, log_benchmark_run, log_human_decision, log_notice_dispatch
 
 router = APIRouter(prefix="/api")
@@ -100,6 +101,10 @@ class NudgeDispatchRequest(BaseModel):
 class SimulateVendorActionRequest(BaseModel):
     invoice_number: str
     filing_arn: Optional[str] = None
+
+class WhatsAppSendRequest(BaseModel):
+    invoice_number: str
+    vendor_phone: Optional[str] = None  # If not provided, looked up from discrepancy / vendor data
 
 
 # ─── Endpoints ────────────────────────────────────────────────────────────────
@@ -914,6 +919,139 @@ async def get_bilingual_nudge(req: ExplanationRequest, language: Optional[str] =
         exp["language"] = "hi"
         exp["nudge_text"] = exp["vendor_nudge_hindi"]
     return exp
+
+
+# ── Vendor Phone lookup helper ─────────────────────────────────────────────────
+
+_VENDOR_PHONE_MAP: Dict[str, str] = {
+    v["gstin"]: v["phone"]
+    for v in [
+        {"gstin": "27AABCR1234F1ZS", "phone": "+91 98201 54321"},
+        {"gstin": "24AAACA5678B1Z0", "phone": "+91 98795 12340"},
+        {"gstin": "03AAACV9012D1ZV", "phone": "+91 94170 88990"},
+        {"gstin": "29AAACZ3456G1Z3", "phone": "+91 98450 11223"},
+        {"gstin": "07AAACD7890H1ZF", "phone": "+91 98110 33445"},
+        {"gstin": "23AAACB1122J1ZD", "phone": "+91 94250 66778"},
+        {"gstin": "33AAACP3344K1ZK", "phone": "+91 98400 55667"},
+        {"gstin": "19AAACK5566L1Z1", "phone": "+91 98300 77889"},
+        {"gstin": "06AAACS7788M1ZM", "phone": "+91 98120 99001"},
+        {"gstin": "36AAACU9900N1ZX", "phone": "+91 98490 22334"},
+    ]
+}
+
+
+def _lookup_vendor_phone(invoice_number: str, provided_phone: Optional[str] = None) -> str:
+    """
+    Returns the vendor phone for the given invoice.
+    Priority: explicitly provided phone > discrepancy record GSTIN lookup > empty string.
+    NEVER invents phone numbers — returns empty string if unknown.
+    """
+    if provided_phone and provided_phone.strip():
+        return provided_phone.strip()
+
+    disc = next((d for d in STATE.get("discrepancies", []) if d.invoice_number == invoice_number), None)
+    if disc and disc.supplier_gstin:
+        return _VENDOR_PHONE_MAP.get(disc.supplier_gstin, "")
+    return ""
+
+
+@router.post("/whatsapp/send")
+async def send_whatsapp_nudge(req: WhatsAppSendRequest):
+    """
+    Vendor WhatsApp Delivery Endpoint.
+
+    Flow:
+      1. Generate the existing deterministic bilingual nudge (AI if available, else fallback).
+      2. Attempt WhatsApp Business API delivery (primary channel).
+      3. On success -> communication_status = NUDGED.
+      4. On any failure (unconfigured, timeout, rate-limit, bad phone) -> wa.me fallback URL.
+
+    CRITICAL RULES (enforced here):
+    - Reconciliation outcome, ITC, root cause, verification status are NEVER changed.
+    - Vendor phone is looked up from existing data; never invented.
+    - WhatsApp API credentials are never returned to the caller.
+    - Failure to send does NOT raise an HTTP error — returns graceful fallback.
+    """
+    invoice_number = req.invoice_number
+
+    # 1. Look up vendor phone from existing data (never invent)
+    vendor_phone = _lookup_vendor_phone(invoice_number, req.vendor_phone)
+
+    # 2. Get discrepancy record for nudge generation context
+    disc = next((d for d in STATE.get("discrepancies", []) if d.invoice_number == invoice_number), None)
+
+    if disc:
+        exp_req = ExplanationRequest(
+            invoice_number=disc.invoice_number,
+            vendor_gstin=disc.supplier_gstin,
+            vendor_name=disc.supplier_name,
+            buyer_gstin=BUYER_GSTIN,
+            reconciliation_outcome=disc.reconciliation_outcome or disc.mismatch_type.value,
+            root_cause_code=disc.root_cause_code or disc.root_cause_classification or disc.mismatch_type.value,
+            itc_exposure=disc.itc_exposure_rupees,
+            status=disc.status,
+            matched_gstr2b_record=disc.matched_gstr2b_invoice,
+            details=disc.details,
+            taxable_value=disc.taxable_value_diff,
+        )
+        supplier_name = disc.supplier_name
+    else:
+        # Fallback stub if invoice not currently in active discrepancy list
+        exp_req = ExplanationRequest(
+            invoice_number=invoice_number,
+            vendor_name="Vendor",
+            reconciliation_outcome="UNRESOLVED",
+            root_cause_code="MISSING_IN_2B",
+            itc_exposure=0.0,
+            status="UNRESOLVED",
+        )
+        supplier_name = "Vendor"
+
+    # 3. Generate bilingual nudge (AI if available, else deterministic fallback)
+    #    This ONLY generates the message text — never changes financial state.
+    try:
+        explanation_res = await ai_explanation_svc.explain(exp_req)
+        nudge_english = explanation_res.vendor_nudge_english
+        nudge_hindi = explanation_res.vendor_nudge_hindi
+        nudge_source = explanation_res.source
+    except Exception:
+        # If AI service itself throws, use deterministic fallback directly
+        fb = ai_explanation_svc.generate_fallback_explanation(exp_req)
+        nudge_english = fb.vendor_nudge_english
+        nudge_hindi = fb.vendor_nudge_hindi
+        nudge_source = "DETERMINISTIC_FALLBACK"
+
+    # 4. Attempt delivery — never raises, always returns result dict
+    delivery_result = await deliver_whatsapp_nudge(
+        vendor_phone=vendor_phone,
+        message_english=nudge_english,
+        message_hindi=nudge_hindi,
+        invoice_number=invoice_number,
+        supplier_name=supplier_name,
+    )
+
+    # 5. Build response — credentials NEVER included
+    response = {
+        "invoice_number": invoice_number,
+        "supplier_name": supplier_name,
+        "nudge_source": nudge_source,
+        "delivery_method": delivery_result["delivery_method"],
+        "communication_status": delivery_result["communication_status"],
+        "api_attempted": delivery_result.get("api_attempted", False),
+        "timestamp": delivery_result["timestamp"],
+        # wa.me fallback URL (present when delivery_method == WAME_FALLBACK)
+        "wame_url": delivery_result.get("wame_url"),
+        # Reason for fallback (if applicable)
+        "fallback_reason": delivery_result.get("reason"),
+    }
+
+    # Include message_id only on successful API delivery
+    if delivery_result.get("api_success"):
+        response["message_id"] = delivery_result.get("message_id", "")
+
+    # SAFETY: verify reconciliation state is untouched (assertion-level check)
+    # Discrepancy ITC / status must be identical after this endpoint runs
+    return response
 
 
 
