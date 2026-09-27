@@ -1,280 +1,322 @@
 <div align="center">
 
-<img src="https://img.shields.io/badge/CrediFlow-GST%20ITC%20Compliance%20Engine-6366f1?style=for-the-badge&logo=lightning&logoColor=white" alt="CrediFlow Banner" />
-
 # CrediFlow
 ### Autonomous GST ITC Reconciliation & Vendor Compliance Nudge Engine
-*Built for MSME Finance & Tax Teams under India's Rule 60 CGST Zero-Mismatch Mandate*  
-*Powered by RocketRide Cloud Multi-Agent AI Pipeline*
+*Built for MSME Finance & Tax Teams under India's Rule 60 CGST Zero-Mismatch Mandate*
 
 [![Live Demo](https://img.shields.io/badge/Live%20Demo-credi--flow--gray.vercel.app-22c55e?style=flat-square&logo=vercel)](https://credi-flow-gray.vercel.app)
 [![API Docs](https://img.shields.io/badge/Swagger%20API-FastAPI%200.115-009688?style=flat-square&logo=fastapi)](https://credi-flow-gray.vercel.app/docs)
-[![RocketRide Pipeline](https://img.shields.io/badge/RocketRide-.pipe%20Load--Bearing-ff4f00?style=flat-square)](pipelines/crediflow_audit_pipeline.pipe)
-[![Test Suite](https://img.shields.io/badge/Tests-32%20Passed-10b981?style=flat-square)](backend/tests/)
+[![Tests](https://img.shields.io/badge/Tests-93%20Passed-10b981?style=flat-square)](backend/tests/)
+[![Python](https://img.shields.io/badge/Python-3.10%2B-3776ab?style=flat-square&logo=python)](pyproject.toml)
 [![License](https://img.shields.io/badge/License-MIT-blue?style=flat-square)](LICENSE)
 
 </div>
 
 ---
 
-## 📌 Executive Summary
+## Overview
 
-### 1. Target User
-**MSME Finance Controllers, Tax Operations Leads, and GST Compliance Teams in India.**
+CrediFlow automates India's GST Input Tax Credit (ITC) reconciliation under **Rule 60 CGST (Zero-Mismatch Mandate)** and **Section 16(2)(aa) CGST Act 2017**.
 
-### 2. The Core Problem
-Under **Rule 60 CGST (Zero-Mismatch Mandate)** and **Section 16(2)(aa) of the CGST Act 2017**, businesses can **only claim Input Tax Credit (ITC) if their suppliers upload corresponding invoices into GSTR-1, auto-populating the buyer's GSTR-2B**. 
+Indian MSMEs lose ₹15–₹45 lakh per month in blocked working capital because suppliers fail to upload invoices into GSTR-1, preventing the buyer's GSTR-2B from auto-populating. Finance teams spend 40+ hours monthly comparing spreadsheets manually.
 
-For typical Indian MSMEs with ₹5 Cr – ₹50 Cr ($600K – $6M) in annual turnover:
-- **₹15 Lakh – ₹45 Lakh ($18K – $55K)** in working capital gets blocked every month due to supplier non-filing, timing differences, rate disparities, or B2B invoices mistakenly filed as B2C.
-- Finance teams spend **40+ hours per month manually comparing Excel spreadsheets** with GSTR-2B JSON files.
-- Manual phone and email follow-ups with defaulting vendors are slow, unrecorded, and legally toothless.
-
-### 3. The CrediFlow Solution
-CrediFlow turns this multi-day manual headache into an **autonomous, 15-millisecond workflow**:
-1. **Automatic Multi-Format Ingestion**: Upload Purchase Register + GSTR-2B (CSV, XLSX, or JSON) via drag-and-drop.
-2. **100% Deterministic Mathematical Reconciliation**: Exact MOD-36 checksum matching with **zero LLM math** (LLMs never compute tax amounts or financial liability).
-3. **Load-Bearing RocketRide Cloud Pipeline**: Discrepancies are routed into a multi-agent AI pipeline defined in `.pipe`:
-   - **Agent A (Classifier)** diagnoses statutory root causes (`B2B_FILED_AS_B2C`, `HSN_TAX_RATE_MISMATCH`, etc.).
-   - **Agent B (Audit Cross-Examiner)** independently audits the raw facts and cross-examines Agent A (`AGREE`, `DISAGREE`, `PARTIALLY_AGREE`).
-4. **Human-in-the-Loop Risk Gate**: Financial exposure ≥ ₹50,000, low confidence (<85%), or agent disagreement triggers mandatory human review.
-5. **Real-World Action**: Generates official ReportLab PDF notices, persists audit trails to SQLite (`data/crediflow.db`), and dispatches bilingual WhatsApp/Email nudges.
-6. **Closed-Loop Resolution**: Vendor amendment simulation triggers re-audit, verifying that blocked ITC drops to ₹0.00.
+CrediFlow turns this into a **sub-100ms automated workflow**.
 
 ---
 
-## 🚀 Live Application & Repository Links
-
-- **Production URL**: [https://credi-flow-gray.vercel.app](https://credi-flow-gray.vercel.app)
-- **API Documentation (Swagger/OpenAPI)**: [https://credi-flow-gray.vercel.app/docs](https://credi-flow-gray.vercel.app/docs)
-- **GitHub Repository**: [https://github.com/Vaishnavi5200/CrediFlow](https://github.com/Vaishnavi5200/CrediFlow)
-- **Committed Pipeline Files**: 
-  - [`pipelines/crediflow_audit_pipeline.pipe`](pipelines/crediflow_audit_pipeline.pipe)
-  - [`pipelines/crediflow_audit.pipe`](pipelines/crediflow_audit.pipe)
-
----
-
-## ⚙️ Architecture & Pipeline Flow
+## Core Workflow
 
 ```
-┌─────────────────────────────────────────────────────────────────────────────┐
-│                           CrediFlow Frontend (React)                        │
-│            Universal Dropzone · Live Pipeline Stepper · Human Gate          │
-└──────────────────────────────────────┬──────────────────────────────────────┘
-                                       │ Multipart / REST (JSON)
-                                       ▼
-┌─────────────────────────────────────────────────────────────────────────────┐
-│                      CrediFlow Backend (FastAPI / Python)                   │
-│                                                                             │
-│  1. FileParser & Ingestion                                                  │
-│     - OpenPyXL / CSV / JSON universal reader with column alias normalization│
-│     - Isolates malformed rows without crashing entire batch                 │
-│                                                                             │
-│  2. GSTReconciliationEngine (100% DETERMINISTIC)                            │
-│     - MOD-36 GSTIN checksum validation                                      │
-│     - Zero LLM arithmetic: ITC blocked exposure mathematically proven       │
-│                                                                             │
-│  3. RocketRide Multi-Tier Service                                           │
-│     - Webhook Priority: HTTPS POST to RocketRide staging webhook            │
-│     - Cloud SDK: WebSocket connection with SSE tracing                      │
-│     - Fallback: Statutory Rule 60 rulebook (honest execution labeling)      │
-│                                                                             │
-│  4. HumanGate Service                                                       │
-│     - 4-trigger policy: Disagreement | Low Conf | Exposure ≥ ₹50k | Malform │
-│                                                                             │
-│  5. Persistent SQLite Database Layer (`data/crediflow.db`)                  │
-│     - Tables: benchmark_runs, audit_ledger, human_decisions, notice_dispatches│
-│                                                                             │
-│  6. Real-World Action Dispatcher                                            │
-│     - Real PDF notices generated on disk via ReportLab                      │
-│     - Bilingual WhatsApp / Email amendment instructions (EN + HI)           │
-└──────────────────────────────────────┬──────────────────────────────────────┘
-                                       │ HTTPS Webhook / WSS WebSocket
-                                       ▼
-┌─────────────────────────────────────────────────────────────────────────────┐
-│               RocketRide Pipeline (`crediflow_audit_pipeline.pipe`)         │
-│                                                                             │
-│  [Source: chat_input (Deterministic Mismatch Record)]                       │
-│         │                                                                   │
-│         ├────────────────────────────────────┐                              │
-│         ▼                                    ▼                              │
-│  [prompt_classifier]                  [prompt_auditor]                      │
-│         │                                    │                              │
-│         ▼                                    ▼                              │
-│  [Agent A: Classifier]                [Agent B: Cross-Examiner]             │
-│  (Taxonomy Root-Cause)                (Adversarial Audit & Scrutiny)        │
-│         │                                    ▲                              │
-│         └────────── text lane ───────────────┘                              │
-│                                                                             │
-│  Output: { root_cause_code, audit_verdict, confidence, reasoning }          │
-└─────────────────────────────────────────────────────────────────────────────┘
+Upload PR + GSTR-2B
+        ↓
+Deterministic Reconciliation (GSTReconciliationEngine)
+        ↓
+Mismatch Detected
+        ↓
+Generate Bilingual Nudge (English + Hindi)
+        ↓
+Try WhatsApp Business API
+        ↙          ↘
+   SUCCESS        FAILURE
+   Nudged      wa.me fallback
+        ↓
+Vendor Amendment → Pending Verification
+        ↓
+SAME Reconciliation Engine Re-runs
+        ↓
+Verified (ITC → ₹0 only after engine confirms match)
 ```
 
 ---
 
-## ⚡ Batch Processing Benchmarks (1,000 Invoices)
+## Architecture
 
-CrediFlow was benchmarked against a synthetic, production-representative dataset of **1,000 invoices** spanning 10 distinct vendors, multi-rate tax brackets (5%, 12%, 18%, 28%), and realistic mismatch scenarios:
+```
+┌─────────────────────────────────────────────────────────────────────────┐
+│                         CrediFlow System                                │
+│                                                                         │
+│  ┌────────────────┐    ┌──────────────────────────────────────────────┐ │
+│  │   React / Vite │    │              FastAPI Backend                 │ │
+│  │   Frontend     │◄──►│                                              │ │
+│  │   (Port 5173)  │    │  ┌────────────────────────────────────────┐ │ │
+│  └────────────────┘    │  │  GSTReconciliationEngine (SINGLE SOT)  │ │ │
+│                        │  │  • Exact match  • Tolerant (≤₹2)       │ │ │
+│                        │  │  • Near-match   • Tax-head mismatch    │ │ │
+│                        │  │  • Missing in 2B                       │ │ │
+│                        │  └────────────────────────────────────────┘ │ │
+│                        │  ┌────────────┐  ┌───────────────────────┐  │ │
+│                        │  │ RocketRide │  │  AI Explanation Svc   │  │ │
+│                        │  │ Agent A/B  │  │  (Gemini / OpenAI /   │  │ │
+│                        │  │ Audit pipe │  │   Deterministic fb)   │  │ │
+│                        │  └────────────┘  └───────────────────────┘  │ │
+│                        │  ┌─────────────────────────────────────────┐ │ │
+│                        │  │       WhatsApp Delivery Service          │ │ │
+│                        │  │  API (primary) → wa.me fallback         │ │ │
+│                        │  └─────────────────────────────────────────┘ │ │
+│                        │  SQLite audit trail  │  ReportLab PDF notices │ │
+│                        └──────────────────────────────────────────────┘ │
+└─────────────────────────────────────────────────────────────────────────┘
+```
 
-| Metric | Measured Real Value | Notes |
-|---|---|---|
-| **Records Processed** | **1,000 Invoices** | Complete Purchase Register vs GSTR-2B batch |
-| **Wall-Clock Processing Time** | **15.71 ms** (0.016 sec) | Deterministic matching engine |
-| **Throughput** | **63,662 invoices / sec** | Sub-millisecond latency for MSME accounting |
-| **Discrepancies Detected** | **89 Mismatches** | Missing in 2B, value variances, HSN rate discrepancies |
-| **Total Blocked ITC Exposure** | **₹8,03,485.58** | Calculated mathematically without AI hallucination |
-| **High-Risk Escalations** | **3 Cases** | Blocked exposure ≥ ₹50,000 routed to Human Gate |
-| **Unhandled Crashes / Retries** | **0 Failures** | Fault-isolated row processing |
-| **Estimated AI Token Usage** | **57,850 Tokens** | ~650 tokens per dual-agent audit (Agent A + B) |
-| **Total Batch Cost** | **$0.0174 (₹1.51 INR)** | Based on GPT-4o-mini baseline pricing |
-| **Cost Per Invoice** | **$0.000017 / invoice** | < 0.002 paise per processed invoice |
-
-> **Cost Transparency Note**: All financial arithmetic is deterministic. The dollar cost above is the estimated LLM token inference cost when running live against OpenAI/RocketRide Cloud.
-
----
-
-## 🤖 Multi-Agent System (Agent A vs Agent B)
-
-CrediFlow does **not** rely on a single LLM prompt. It implements a dual-agent checks-and-balances architecture:
-
-1. **Agent A (Statutory Classifier)**:
-   - Input: Pre-computed deterministic discrepancy JSON (amounts, tax rates, GSTIN, HSN).
-   - Mission: Assign statutory root cause (`B2B_FILED_AS_B2C`, `TIMING_DIFFERENCE`, `RATE_OR_VALUE_DISCREPANCY`, `HSN_TAX_RATE_MISMATCH`, etc.).
-   - Constraint: **Never computes tax amounts**.
-
-2. **Agent B (Audit Cross-Examiner)**:
-   - Input: Raw discrepancy facts + Agent A's classification.
-   - Mission: Independently audit raw facts first under CGST Act Section 16(2), then cross-examine Agent A.
-   - Outputs verdict: `AGREE`, `DISAGREE`, or `PARTIALLY_AGREE`.
-
-3. **Disagreement Detection & Consensus**:
-   - If Agent B disagrees or partially agrees, the consensus check fails and immediately triggers **Human Gate Escalation**.
+**Critical design invariants:**
+- `GSTReconciliationEngine` is the single source of truth — no LLM ever changes ITC, root cause, or match outcome
+- WhatsApp delivery changes communication state only — never financial state
+- ITC becomes ₹0 only after successful re-reconciliation, not on vendor amendment or message send
 
 ---
 
-## 🛡️ Human-in-the-Loop (HITL) Gate
+## Tech Stack
 
-The Human Gate safeguards financial decisions and prevents unintended vendor friction.
-
-### The 4 Escalation Triggers:
-1. **Agent Disagreement**: Agent B returns `DISAGREE` or `PARTIALLY_AGREE`.
-2. **Low AI Confidence**: Agent A or B confidence falls below 85% (`CONFIDENCE_THRESHOLD=0.85`).
-3. **High Financial Exposure**: Blocked ITC ≥ ₹50,000 (`HIGH_VALUE_THRESHOLD_INR=50000`).
-4. **Malformed / Corrupt Data**: Invalid GSTIN checksum or unparseable line item.
-
-### Genuine Downstream Workflow Impact:
-- **`APPROVED`**: Generates notice, updates audit log, and proceeds to vendor dispatch.
-- **`EDITED`**: Reviewer's custom note or amended instruction directly overrides the notice dispatch body.
-- **`REJECTED`**: **Blocks dispatch (HTTP 400)**, halts notification to the supplier, marks invoice status as `WITHHELD_MANUAL_AUDIT`, and records the rejection reason in SQLite.
-
----
-
-## 📦 Real-World Actions & Closed-Loop Verification
-
-CrediFlow ensures tangible real-world outputs rather than mock notifications:
-
-1. **Real SQLite Database Persistence (`data/crediflow.db`)**:
-   - Every benchmark run, dual-agent audit, human review decision, and notice dispatch is permanently written to disk.
-   - Verified via `/api/db/summary` endpoint and displayed in UI.
-2. **Real ReportLab PDF Documents on Disk**:
-   - Generates statutory GST ITC notices in `data/reports/` with official formatting, Section 16(2)(aa) legal notice, line-item table, and QR/payment hold clause.
-   - Direct download available via `GET /api/nudge/pdf/{invoice_number}`.
-3. **Bilingual Amendment Steps (English + Hindi)**:
-   - Generates exact GSTR-1 amendment instructions for supplier accountants (e.g. Table 4A vs Table 9A).
-4. **Closed-Loop Verification**:
-   - When vendor amends their return, `/api/simulate/re-audit` re-runs deterministic matching.
-   - Verifies that ITC exposure drops to ₹0.00 and records recovered working capital.
+| Layer | Technology |
+|---|---|
+| Frontend | React 19, Vite 8, Lucide React |
+| Backend | FastAPI 0.115, Python 3.10+, Uvicorn |
+| Reconciliation | Pure Python deterministic engine (zero LLM arithmetic) |
+| AI Explanation | Gemini Flash / OpenAI GPT-4o-mini (with full deterministic fallback) |
+| Audit Pipeline | RocketRide Cloud (Agent A: Classifier + Agent B: Cross-Examiner) |
+| WhatsApp | Meta WhatsApp Business Cloud API v20.0 + wa.me fallback |
+| PDF | ReportLab |
+| Database | SQLite (audit trail) |
+| Deployment | Vercel (frontend + serverless API) |
 
 ---
 
-## 🔒 Security & Secret Hygiene
+## Local Setup
 
-- **Zero Secrets Committed**: All credentials are read from `.env` via `python-dotenv`.
-- **Git Ignored**: `.env`, `.env.local`, `*.db`, `data/reports/`, and `data/uploads/` are strictly ignored in `.gitignore`.
-- **Key Architecture Clarification**:
-  - **RocketRide Private Key (`rr_...`)**: Required for backend webhook/SDK execution.
-  - **Publishable Key (`pk_...`)**: Only used for public frontend sessions. Using a `pk_` key in backend causes 401/400 errors.
+### Prerequisites
+- Python 3.10+
+- Node.js 18+
 
----
+### Backend
 
-## 💻 Local Setup & Execution Guide
-
-### 1. Prerequisites
-- Python 3.9+ or 3.10+
-- Node.js 18+ & npm
-
-### 2. Backend Setup
 ```bash
-# Clone the repository
 git clone https://github.com/Vaishnavi5200/CrediFlow.git
 cd CrediFlow
 
-# Create and activate virtual environment
-python3 -m venv .venv
-source .venv/bin/activate  # On Windows: .venv\Scripts\activate
-
-# Install Python dependencies
+python -m venv .venv
+source .venv/bin/activate       # Windows: .venv\Scripts\activate
 pip install -r requirements.txt
 
-# Create environment configuration
 cp .env.example .env
+# Edit .env and fill in required values (see Environment Variables below)
 
-# Run all 32 tests to verify compliance
-pytest backend/tests/ -v
-
-# Start FastAPI backend
-uvicorn backend.app.main:app --host 127.0.0.1 --port 8000 --reload
+uvicorn backend.app.main:app --host 0.0.0.0 --port 8000 --reload
+# API: http://localhost:8000
+# Swagger docs: http://localhost:8000/docs
 ```
 
-### 3. Frontend Setup
+### Frontend
+
 ```bash
 cd frontend
 npm install
 npm run dev
+# App: http://localhost:5173
 ```
-
-Visit **http://localhost:5173** to use the development UI, or **http://localhost:8000** for the unified production server.
 
 ---
 
-## 🧪 Comprehensive Test Suite (32 Passed)
+## Environment Variables
+
+Copy `.env.example` to `.env` and configure:
 
 ```bash
-pytest backend/tests/ -v
+# ── RocketRide Pipeline (AI audit — optional) ─────────────────────────────────
+ROCKETRIDE_WEBHOOK_URL=https://staging.rocketride.ai/webhook/...
+ROCKETRIDE_WEBHOOK_TOKEN=rr_your_private_token_here
+
+# ── LLM Provider (optional — for AI explanation) ─────────────────────────────
+GEMINI_API_KEY=AIza...           # OR
+OPENAI_API_KEY=sk-proj-...
+
+# ── WhatsApp Business API (optional — primary delivery channel) ───────────────
+# Get from Meta Business Manager > WhatsApp > API Setup
+WHATSAPP_API_TOKEN=              # Permanent System User Token
+WHATSAPP_PHONE_NUMBER_ID=        # Phone Number ID
+WHATSAPP_API_VERSION=v20.0       # Default; usually no change needed
+# If not set, /api/whatsapp/send automatically falls back to wa.me
+
+# ── Email dispatch (optional) ─────────────────────────────────────────────────
+SMTP_HOST=smtp.gmail.com
+SMTP_PORT=587
+SMTP_USER=your_email@gmail.com
+SMTP_PASSWORD=your_app_password
+
+# ── Human Gate thresholds ─────────────────────────────────────────────────────
+HIGH_VALUE_THRESHOLD_INR=50000
+CONFIDENCE_THRESHOLD=0.85
 ```
 
-Includes tests for:
-- Deterministic reconciliation math & Rule 60 validation.
-- GSTIN MOD-36 checksum verification.
-- Negative amounts & malformed row isolation.
-- Dual-Agent A/B consensus & disagreement triggering HITL.
-- Human Gate `REJECT` blocking notice dispatch.
-- Real PDF generation with `%PDF` header validation.
-- Real SQLite database CRUD operations on all 4 tables.
-- 1,000-invoice batch performance & cost calculations.
-- Closed-loop recovery verification.
+> **Security:** All credentials are server-side only. The frontend never sees API tokens, WhatsApp credentials, or SMTP passwords.
 
 ---
 
-## 🎬 12-Step Final Demo Walkthrough
+## WhatsApp Integration
 
-Judges and reviewers can follow this exact flow on the live app:
-1. **Open Application**: Visit [credi-flow-gray.vercel.app](https://credi-flow-gray.vercel.app).
-2. **Step 1 — Upload Invoices**: Click **"Fill with Demo Dataset (45 Invoices)"** or drag and drop custom CSV/Excel files into the dropzones.
-3. **Step 2 — Run Audit**: Click **`[ Run Audit ]`**. Watch the visual pipeline progress: Ingest → Reconcile → ITC Calc → Agent A → Agent B → Validation.
-4. **Step 3 — Inspect Deterministic Discrepancies**: See 5 discrepancies identified totaling ₹70,580.00 at-risk ITC.
-5. **Step 4 — Dual-Agent Scrutiny**: Click on `INV-0881` to view Agent A (Root-Cause Classifier) and Agent B (Audit Cross-Examiner) outputs side-by-side.
-6. **Step 5 — Human Gate Review**: Navigate to the **Human Gate** tab to see high-exposure and low-confidence items queued for review.
-7. **Step 6 — Human Decision**: Click **Approve** or **Reject** on a pending item. Notice how rejecting an item blocks downstream notice dispatch.
-8. **Step 7 — Real Document Download**: Click **Download Official PDF Document** to inspect the real ReportLab generated notice with legal citations.
-9. **Step 8 — Dispatch Nudge**: Click **Dispatch Nudge** to trigger simulated WhatsApp & Email notifications with bilingual instructions.
-10. **Step 9 — Closed-Loop Resolution**: Click **Simulate Vendor Filing (ARN)** to simulate the vendor amending their GSTR-1 on the GST Portal.
-11. **Step 10 — Recalculation & Recovery**: The engine automatically re-reconciles: blocked ITC drops to ₹0.00, ₹42,500 ITC recovered, and celebratory confetti triggers.
-12. **Step 11 — Scalability & Cost Telemetry**: Click the **Batch Scale** tab and click **`1,000 Rows`** to execute live 1,000-record batch reconciliation in 15ms at $0.0174 cost.
-13. **Step 12 — SQLite Verification**: Inspect the SQLite Audit DB status card showing real persistent records in `data/crediflow.db`.
+CrediFlow uses a **primary API → automatic wa.me fallback** pattern:
+
+1. When a mismatch is detected and the nudge is dispatched, `POST /api/whatsapp/send` is called
+2. The backend generates the existing bilingual nudge (English + Hindi) using the AI service (or deterministic fallback)
+3. **If `WHATSAPP_API_TOKEN` and `WHATSAPP_PHONE_NUMBER_ID` are set** → message is sent via Meta WhatsApp Business Cloud API → `communication_status: NUDGED`
+4. **On any failure** (unconfigured, timeout, rate-limit, invalid phone, bad credentials) → returns a pre-filled `wa.me` URL → frontend opens it as a new tab automatically
+
+### To activate live WhatsApp API sending:
+
+```bash
+# In Meta Business Manager:
+# 1. Create a WhatsApp Business App
+# 2. Add a phone number
+# 3. Generate a Permanent System User Token
+# 4. Copy the Phone Number ID from the API Setup panel
+
+WHATSAPP_API_TOKEN=<permanent-system-user-token>
+WHATSAPP_PHONE_NUMBER_ID=<phone-number-id>
+```
+
+No code changes are required to switch between API mode and wa.me fallback.
 
 ---
 
-<div align="center">
-  <sub>CrediFlow · Team Nexora · Built for RocketRide Buildathon 2026 / HackWithUP Round 2</sub>
-</div>
+## API Reference
+
+| Endpoint | Method | Description |
+|---|---|---|
+| `/api/reconcile` | POST | Run deterministic reconciliation on demo dataset |
+| `/api/reconcile-custom` | POST | Reconcile custom PR + GSTR-2B (JSON body) |
+| `/api/upload-and-reconcile` | POST | Upload CSV/XLSX/JSON files and reconcile |
+| `/api/audit` | POST | Run RocketRide dual-agent audit (A + B) |
+| `/api/explain` | POST | AI explanation for a reconciliation result |
+| `/api/discrepancy/explain` | POST | Explanation + bilingual nudge for an invoice |
+| `/api/nudge/dispatch` | POST | Dispatch PDF + email notice |
+| `/api/whatsapp/send` | POST | Send WhatsApp nudge (API primary → wa.me fallback) |
+| `/api/amendment/simulate` | POST | Simulate vendor GSTR-1 amendment → PENDING_VERIFICATION |
+| `/api/amendment/verify` | POST | Re-run reconciliation engine → VERIFIED or ongoing mismatch |
+| `/api/human-gate/queue` | GET | List human review queue |
+| `/api/human-gate/decide` | POST | Submit APPROVED / EDITED / REJECTED decision |
+| `/api/vendor-scorecards` | GET | Vendor compliance health scorecards |
+| `/api/benchmarks` | GET | High-volume benchmark run |
+| `/api/db/summary` | GET | SQLite audit trail summary |
+
+Full interactive docs: `http://localhost:8000/docs`
+
+---
+
+## Demo Workflow
+
+1. **Open** `http://localhost:5173`
+2. **Run Reconciliation** → 45 demo invoices loaded; 5 mismatches detected (₹70,580 ITC at risk)
+3. **Run Audit** → Agent A classifies root cause; Agent B cross-examines
+4. **Open Human Gate** → Review flagged high-value invoices
+5. **Dispatch Nudge** → PDF generated; WhatsApp API attempted; wa.me fallback if unconfigured
+6. **Simulate Amendment** → Invoice status → PENDING_VERIFICATION
+7. **Verify** → Same engine re-runs; ITC drops to ₹0 only on confirmed match
+8. **Vendor Scorecards** → VCS formula: 100 − (0.45·S_exposure + 0.35·S_frequency + 0.20·S_aging)
+
+---
+
+## Project Structure
+
+```
+CrediFlow/
+│
+├── backend/                         # FastAPI application
+│   ├── app/
+│   │   ├── api/
+│   │   │   └── routes.py            # All API endpoints
+│   │   ├── core/
+│   │   │   ├── gst_reconciliation.py  # Deterministic engine (single source of truth)
+│   │   │   ├── synthetic_data_generator.py
+│   │   │   ├── file_parser.py
+│   │   │   └── db.py
+│   │   ├── services/
+│   │   │   ├── whatsapp_delivery_service.py  # WhatsApp API + wa.me fallback
+│   │   │   ├── ai_explanation_service.py     # Gemini/OpenAI + deterministic fallback
+│   │   │   ├── rocketride_service.py         # Agent A/B audit pipeline
+│   │   │   ├── audit_service.py
+│   │   │   ├── human_gate.py
+│   │   │   ├── notice_generator.py           # Bilingual nudges + ReportLab PDF
+│   │   │   └── nudge_dispatcher.py
+│   │   └── main.py
+│   └── tests/                       # 93-test pytest suite
+│
+├── frontend/                        # React + Vite dashboard
+│   ├── src/
+│   │   ├── App.jsx                  # Single-page compliance dashboard
+│   │   ├── App.css
+│   │   ├── index.css
+│   │   └── main.jsx
+│   ├── public/                      # Static assets (icons, logos)
+│   ├── package.json
+│   └── vite.config.js               # Dev proxy: /api → localhost:8000
+│
+├── api/
+│   └── index.py                     # Vercel serverless ASGI entry point
+│
+├── pipelines/
+│   └── crediflow_audit.pipe         # RocketRide Agent A + B pipeline definition
+│
+├── data/                            # Runtime-generated (gitignored)
+│   ├── crediflow.db                 # SQLite audit trail
+│   ├── reports/                     # Generated PDF notices
+│   └── uploads/                     # Uploaded PR/GSTR-2B files
+│
+├── .env.example                     # Environment variable template
+├── .gitignore
+├── README.md
+├── requirements.txt                 # Python dependencies
+├── pyproject.toml                   # Project metadata + build config
+├── main.py                          # Root entry point (Vercel / direct uvicorn)
+└── vercel.json                      # Vercel routing config
+```
+
+---
+
+## Running Tests
+
+```bash
+# Full suite (93 tests)
+.venv/bin/python -m pytest backend/tests/ -v
+
+# Specific modules
+.venv/bin/python -m pytest backend/tests/test_phase2_reconciliation_engine.py -v
+.venv/bin/python -m pytest backend/tests/test_step7_amendment_verification.py -v
+.venv/bin/python -m pytest backend/tests/test_step8_final_e2e.py -v
+```
+
+---
+
+## Deployment
+
+The application deploys to **Vercel** automatically on push to `main`:
+
+- Frontend (`frontend/dist/`) is served as static assets
+- API routes (`/api/*`) are handled by `api/index.py` as a Python serverless function
+- Configuration: [`vercel.json`](vercel.json)
+
+**Live URL:** [https://credi-flow-gray.vercel.app](https://credi-flow-gray.vercel.app)
+
+---
+
+## License
+
+MIT © 2026 Vaishnavi Dwivedi

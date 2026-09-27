@@ -1,20 +1,54 @@
+# ── Secrets ──────────────────────────────────────────────────────────────────
 .env
 .env.local
+.env.*.local
+
+# ── Python ────────────────────────────────────────────────────────────────────
 .venv/
 __pycache__/
 *.pyc
 *.pyo
+*.pyd
 *.egg-info/
+dist/
+build/
 .pytest_cache/
+.mypy_cache/
+.ruff_cache/
+
+# ── Runtime-generated data ────────────────────────────────────────────────────
 data/uploads/
 data/reports/
 *.db
 *.log
+
+# ── Frontend build output ─────────────────────────────────────────────────────
 node_modules/
 frontend/node_modules/
+frontend/dist/
 frontend/.next/
 frontend/out/
+
+# ── Root public/ (stale Vercel build mirror — use frontend/dist instead) ─────
+public/assets/
+public/*.html
+public/*.js
+public/*.css
+
+# ── RocketRide local workspace ────────────────────────────────────────────────
 .rocketride/
+
+# ── Vercel deployment cache ───────────────────────────────────────────────────
+.vercel/
+
+# ── Generated PDFs / one-off reports ─────────────────────────────────────────
+*.pdf
+
+# ── OS & editor files ─────────────────────────────────────────────────────────
 .DS_Store
+Thumbs.db
 .system_generated/
-.vercel
+.idea/
+.vscode/
+*.swp
+*.swo
