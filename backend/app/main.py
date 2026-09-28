@@ -13,7 +13,7 @@ from .api.routes import router as api_router
 
 app = FastAPI(
     title="CrediFlow API",
-    description="Deterministic GST ITC Compliance & Multi-Agent Resolution Engine under Rule 60 CGST",
+    description="Deterministic GST ITC Compliance & Statutory Resolution Engine under Rule 60 CGST",
     version="1.0.0"
 )
 
@@ -30,7 +30,16 @@ app.add_middleware(
 app.include_router(api_router)
 
 # Mount static frontend directory if built
-FRONTEND_DIST = os.path.abspath(os.path.join(os.path.dirname(__file__), "../../frontend/dist"))
+FRONTEND_DIST = None
+for candidate in [
+    os.path.abspath(os.path.join(os.path.dirname(__file__), "../../frontend/dist")),
+    os.path.abspath(os.path.join(os.path.dirname(__file__), "../../../frontend/dist")),
+    os.path.abspath(os.path.join(os.getcwd(), "frontend/dist")),
+    os.path.abspath(os.path.join(os.getcwd(), "dist")),
+]:
+    if os.path.exists(candidate) and os.path.exists(os.path.join(candidate, "index.html")):
+        FRONTEND_DIST = candidate
+        break
 
 def _read_bytes(path: str) -> bytes:
     with open(path, "rb") as f:
@@ -54,7 +63,7 @@ def _get_media_type(path: str) -> str:
         return "application/json"
     return "text/plain"
 
-if os.path.exists(FRONTEND_DIST):
+if FRONTEND_DIST:
     assets_dir = os.path.join(FRONTEND_DIST, "assets")
     if os.path.exists(assets_dir):
         try:
@@ -81,4 +90,4 @@ if os.path.exists(FRONTEND_DIST):
 else:
     @app.get("/", response_class=HTMLResponse)
     def index():
-        return HTMLResponse(content="<h1>CrediFlow API Online</h1><p>Frontend not compiled</p>")
+        return HTMLResponse(content="<h1>CrediFlow API Online</h1><p>API is active at /api. Frontend is served from static edge.</p>")
