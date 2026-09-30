@@ -110,9 +110,23 @@ class HumanGateEntry:
             self.pipeline_result.get("root_cause_code")
             or self.mismatch_record.get("mismatch_type", "")
         )
+        exp = float(
+            self.mismatch_record.get("itc_exposure_rupees")
+            or self.mismatch_record.get("itc_exposure_inr")
+            or self.mismatch_record.get("itc_exposure")
+            or 0.0
+        )
+        inv_no = str(self.mismatch_record.get("invoice_number") or self.mismatch_id)
+        supp_name = str(self.mismatch_record.get("supplier_name") or "Vendor")
+        supp_gstin = str(self.mismatch_record.get("supplier_gstin") or "")
+        mismatch_type = str(self.mismatch_record.get("mismatch_type") or "")
+        details = str(self.mismatch_record.get("details") or "")
+        severity = str(self.mismatch_record.get("severity") or "MEDIUM")
+
         return {
             "gate_id": self.gate_id,
             "mismatch_id": self.mismatch_id,
+            "invoice_number": inv_no,
             "decision": self.decision.value,
             "triggers": [t.value for t in self.triggers],
             "trigger_reasons": self.trigger_reasons,
@@ -121,10 +135,16 @@ class HumanGateEntry:
             "decision_by": self.decision_by,
             "decision_note": self.decision_note,
             "edited_message": self.edited_message,
-            "itc_exposure_inr": self.mismatch_record.get("itc_exposure_rupees", 0),
-            "supplier_name": self.mismatch_record.get("supplier_name", ""),
-            "mismatch_type": self.mismatch_record.get("mismatch_type", ""),
+            "itc_exposure_inr": exp,
+            "itc_exposure_rupees": exp,
+            "itc_exposure": exp,
+            "supplier_name": supp_name,
+            "supplier_gstin": supp_gstin,
+            "mismatch_type": mismatch_type,
             "root_cause_code": root_cause,
+            "root_cause_classification": root_cause,
+            "details": details,
+            "severity": severity,
             "audit_log": self.audit_log,
         }
 
@@ -234,3 +254,7 @@ class HumanGate:
     @property
     def total_count(self) -> int:
         return len(self._queue)
+
+    def clear(self) -> None:
+        """Clears all entries in the approval queue."""
+        self._queue.clear()

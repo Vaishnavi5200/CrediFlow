@@ -48,6 +48,8 @@ class AuditService:
 
         if filter_invoices:
             discrepancies = [d for d in discrepancies if d.invoice_number in filter_invoices]
+        else:
+            self.gate.clear()
 
         total_exposure = sum(d.itc_exposure_rupees for d in discrepancies)
         high_exposure_count = sum(1 for d in discrepancies if d.is_high_value)
