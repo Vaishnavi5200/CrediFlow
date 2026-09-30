@@ -11,8 +11,11 @@ import {
 } from 'lucide-react';
 import confetti from 'canvas-confetti';
 
-// API Base — always relative: Vite proxy handles dev (:5173→:8000), Vercel handles prod
-const API_BASE = '/api';
+// API Base — dynamic Render backend URL if provided via VITE_API_URL, fallback to relative /api
+const API_BASE = import.meta.env.VITE_API_URL 
+  ? `${import.meta.env.VITE_API_URL}/api` 
+  : '/api';
+
 
 
 export default function App() {
