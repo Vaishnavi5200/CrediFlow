@@ -218,50 +218,113 @@ export default function App() {
 
   // Direct Deterministic Reconciliation Trigger
   const handleRunReconciliation = async () => {
+    // 1. Validate that both purchase_register and gstr2b files are selected
+    const isPrSelected = Boolean(prFile?.fileObj || prFile?.loaded);
+    const isG2bSelected = Boolean(g2bFile?.fileObj || g2bFile?.loaded);
+
+    if (!isPrSelected || !isG2bSelected) {
+      const validationError = 'Please select both Purchase Register and GSTR-2B files before executing reconciliation.';
+      setApiError(validationError);
+      showNotification(validationError, 'error');
+      return;
+    }
+
     try {
       setLoading(true);
       setApiError(null);
+
       let res;
       if (prFile.fileObj && g2bFile.fileObj) {
+        // Construct FormData object appending both files
         const formData = new FormData();
+        formData.append('purchase_register', prFile.fileObj);
+        formData.append('gstr2b', g2bFile.fileObj);
         formData.append('pr_file', prFile.fileObj);
         formData.append('g2b_file', g2bFile.fileObj);
-        res = await fetch(`${API_BASE}/upload-and-reconcile`, {
+
+        res = await fetch(`${API_BASE}/reconcile`, {
           method: 'POST',
           body: formData
         });
       } else {
-        res = await fetch(`${API_BASE}/reconcile`, { method: 'POST' });
+        // If demo files are preloaded, execute backend deterministic reconciliation
+        res = await fetch(`${API_BASE}/reconcile`, {
+          method: 'POST'
+        });
       }
 
       if (!res.ok) {
-        const errData = await res.json().catch(() => ({ detail: 'Reconciliation failed' }));
-        throw new Error(errData.detail || `Server returned ${res.status}`);
+        const errData = await res.json().catch(() => ({ detail: `Reconciliation failed with status ${res.status}` }));
+        throw new Error(errData.detail || `Server returned HTTP ${res.status}`);
       }
 
       const data = await res.json();
-      setDiscrepancies(data.discrepancies || []);
-      setStats(prev => ({
-        ...prev,
-        totalInvoices: data.purchase_register_count || prev.totalInvoices,
-        matched: data.matched_count || 0,
-        discrepancies: data.discrepancies_count || 0,
-        exposureRisk: data.total_itc_exposure_rupees || 0,
-      }));
 
-      // Refresh human gate queue
-      const gateRes = await fetch(`${API_BASE}/human-gate/queue`);
-      if (gateRes.ok) {
-        const gateData = await gateRes.json();
-        setGateQueue(gateData.queue || []);
-        setStats(prev => ({ ...prev, pendingHumanGate: gateData.pending_count || 0 }));
+      // Update application state
+      if (data.discrepancies) {
+        setDiscrepancies(data.discrepancies);
       }
 
-      showNotification(`Reconciliation complete: ${data.matched_count} matched, ${data.discrepancies_count} discrepancies (₹${(data.total_itc_exposure_rupees || 0).toLocaleString()} at risk)`, 'success');
+      if (data.stats) {
+        setStats(prev => ({
+          ...prev,
+          ...data.stats
+        }));
+      } else {
+        setStats(prev => ({
+          ...prev,
+          totalInvoices: data.purchase_register_count ?? prev.totalInvoices,
+          matched: data.matched_count ?? 0,
+          discrepancies: data.discrepancies_count ?? 0,
+          exposureRisk: data.total_itc_exposure_rupees ?? 0,
+        }));
+      }
+
+      // Update pipeline stepper position to step 2 (Reconcile)
+      setCurrentStep(2);
+
+      // Refresh Human Gate queue so review counts update immediately
+      const gateRes = await fetch(`${API_BASE}/human-gate/queue`).catch(() => null);
+      if (gateRes && gateRes.ok) {
+        const gateData = await gateRes.json().catch(() => ({}));
+        if (gateData.queue) {
+          setGateQueue(gateData.queue);
+          setStats(prev => ({ ...prev, pendingHumanGate: gateData.pending_count ?? gateData.queue.length }));
+        }
+      }
+
+      // Execute statutory compliance audit so audit history is populated
+      const auditRes = await fetch(`${API_BASE}/audit`, { method: 'POST' }).catch(() => null);
+      if (auditRes && auditRes.ok) {
+        const auditData = await auditRes.json().catch(() => ({}));
+        if (auditData.results) {
+          setAudits(auditData.results);
+          if (auditData.results.length > 0) {
+            setSelectedAudit(auditData.results[0]);
+          }
+        }
+      }
+
+      // Refresh DB Summary metrics
+      const dbRes = await fetch(`${API_BASE}/db/summary`).catch(() => null);
+      if (dbRes && dbRes.ok) {
+        const dbData = await dbRes.json().catch(() => null);
+        if (dbData) setDbSummary(dbData);
+      }
+
+      const matchedCount = data.matched_count ?? data.stats?.matched ?? 0;
+      const discrepancyCount = data.discrepancies_count ?? data.stats?.discrepancies ?? 0;
+      const totalExposure = data.total_itc_exposure_rupees ?? data.stats?.exposureRisk ?? 0;
+
+      showNotification(
+        `Reconciliation complete: ${matchedCount} matched, ${discrepancyCount} discrepancies (₹${totalExposure.toLocaleString()} at risk)`,
+        'success'
+      );
     } catch (err) {
       console.error('Reconciliation error:', err);
-      setApiError(err.message || 'Failed to execute reconciliation');
-      showNotification(`Reconciliation error: ${err.message}`, 'error');
+      const errorMessage = err.message || 'Failed to execute reconciliation';
+      setApiError(errorMessage);
+      showNotification(`Reconciliation error: ${errorMessage}`, 'error');
     } finally {
       setLoading(false);
     }

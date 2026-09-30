@@ -151,13 +151,35 @@ def get_demo_data():
 
 
 @router.post("/reconcile")
-def run_reconciliation():
+async def run_reconciliation(
+    pr_file: Optional[UploadFile] = File(None),
+    g2b_file: Optional[UploadFile] = File(None),
+    purchase_register: Optional[UploadFile] = File(None),
+    gstr2b: Optional[UploadFile] = File(None),
+):
     """
     Executes 100% deterministic reconciliation between Purchase Register and GSTR-2B.
+    Accepts uploaded files (via pr_file/g2b_file or purchase_register/gstr2b) or uses demo dataset.
     Zero LLM arithmetic.
     """
     t0 = time.monotonic()
-    pr, g2b = generate_demo_dataset()
+
+    # Resolve files if provided
+    pr_upload = pr_file or purchase_register
+    g2b_upload = g2b_file or gstr2b
+
+    if pr_upload and g2b_upload:
+        pr_content = await pr_upload.read()
+        g2b_content = await g2b_upload.read()
+        pr, pr_failed = parse_file_content(pr_content, pr_upload.filename or "purchase_register.csv")
+        g2b, g2b_failed = parse_file_content(g2b_content, g2b_upload.filename or "gstr_2b.csv")
+        if not pr:
+            raise HTTPException(status_code=400, detail=f"No valid records found in Purchase Register ({pr_upload.filename})")
+        if not g2b:
+            raise HTTPException(status_code=400, detail=f"No valid records found in GSTR-2B ({g2b_upload.filename})")
+    else:
+        pr, g2b = generate_demo_dataset()
+
     discrepancies = engine.reconcile(pr, g2b)
     elapsed_ms = (time.monotonic() - t0) * 1000
 
@@ -167,18 +189,40 @@ def run_reconciliation():
     STATE["status"] = "RECONCILED"
 
     disc_dicts = [_serialize_discrepancy(d) for d in discrepancies]
-
     total_exposure = sum(d.itc_exposure_rupees for d in discrepancies)
+    matched_count = len(pr) - len(discrepancies)
+
+    # Populate Human Gate queue for high-value or low-confidence discrepancies
+    for d in discrepancies:
+        if d.requires_human_gate or d.is_high_value:
+            gate.evaluate(
+                mismatch_id=d.invoice_number,
+                confidence_score=0.95 if d.mismatch_type == MismatchType.EXACT_MATCH else 0.80,
+                itc_risk_rupees=d.itc_exposure_rupees,
+                explanation=d.details,
+                rule_citation=d.rule_citation,
+                proposed_action="DISPATCH_STATUTORY_NUDGE"
+            )
+
+    stats = {
+        "totalInvoices": len(pr),
+        "matched": matched_count,
+        "discrepancies": len(discrepancies),
+        "exposureRisk": total_exposure,
+        "exposureRecovered": 0,
+        "pendingHumanGate": gate.pending_count,
+    }
 
     return {
         "execution_time_ms": round(elapsed_ms, 2),
         "purchase_register_count": len(pr),
         "gstr_2b_count": len(g2b),
-        "matched_count": len(pr) - len(discrepancies),
+        "matched_count": matched_count,
         "discrepancies_count": len(discrepancies),
         "total_itc_exposure_rupees": total_exposure,
         "high_value_count": sum(1 for d in discrepancies if d.is_high_value),
-        "discrepancies": disc_dicts
+        "discrepancies": disc_dicts,
+        "stats": stats
     }
 
 
