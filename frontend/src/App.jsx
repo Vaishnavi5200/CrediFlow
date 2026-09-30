@@ -1690,7 +1690,16 @@ export default function App() {
                         </div>
                       </div>
                       {(v.discrepancy_count > 0 || v.mismatched_invoices > 0) && (
-                        <button onClick={() => handleDispatchNudge(v.supplier_gstin || v.gstin)} style={{ width: '100%', background: '#0f2e26', color: '#fff', border: 'none', borderRadius: 8, padding: '8px', fontSize: 12, fontWeight: 600, cursor: 'pointer' }}>Send Compliance Nudge</button>
+                        <button
+                          onClick={() => {
+                            const vendorNotice = `CrediFlow Statutory Notice: Attention ${v.supplier_name || v.vendor_name}, we detected ${v.discrepancy_count || v.mismatched_invoices} GST variance(s) (ITC ₹${(v.itc_exposure_rupees || v.itc_blocked_inr || 0).toLocaleString()} at risk). Please check your GSTR-1 filings.`;
+                            window.open(`https://wa.me/?text=${encodeURIComponent(vendorNotice)}`, '_blank', 'noopener,noreferrer');
+                            handleDispatchNudge(v.supplier_gstin || v.gstin);
+                          }}
+                          style={{ width: '100%', background: '#0f2e26', color: '#fff', border: 'none', borderRadius: 8, padding: '8px', fontSize: 12, fontWeight: 600, cursor: 'pointer' }}
+                        >
+                          Send Compliance Nudge
+                        </button>
                       )}
                     </div>
                   ))}
@@ -2960,6 +2969,17 @@ export default function App() {
 
                 <button
                   onClick={() => {
+                    const textToDispatch = isEditingMessage
+                      ? customEditMsg
+                      : (nudgeLanguage === 'hi' 
+                          ? (explanationData?.vendor_nudge_hindi || `CrediFlow Statutory Rule 60 Compliance Notice for Invoice ${reviewModalItem.invoice_number}`)
+                          : (explanationData?.vendor_nudge_english || `CrediFlow Statutory Rule 60 Compliance Notice for Invoice ${reviewModalItem.invoice_number}`));
+                    
+                    // Directly open WhatsApp on click to prevent browser popup blockers
+                    const encodedMsg = encodeURIComponent(textToDispatch);
+                    window.open(`https://wa.me/?text=${encodedMsg}`, '_blank', 'noopener,noreferrer');
+
+                    // Apply statutory gate decision and trigger background dispatch
                     handleGateDecision(reviewModalItem.gate_id, 'APPROVED');
                     handleDispatchNudge(reviewModalItem.invoice_number);
                   }}
