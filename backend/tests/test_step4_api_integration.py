@@ -146,6 +146,12 @@ def test_api_reconcile_empty_datasets():
 
 def test_api_discrepancy_resolution_lifecycle():
     """Verify /discrepancy/resolve endpoint updates status and decrements blocked ITC exposure."""
+    from backend.app.api.routes import STATE
+    from backend.app.core.synthetic_data_generator import generate_demo_dataset
+    pr, g2b = generate_demo_dataset()
+    STATE["purchase_register"] = pr
+    STATE["gstr_2b_records"] = g2b
+
     # First reconcile
     rec_res = client.post("/api/reconcile")
     assert rec_res.status_code == 200
@@ -171,6 +177,13 @@ def test_api_discrepancy_resolution_lifecycle():
 
 def test_api_vendor_scorecards_endpoint():
     """Verify vendor scorecards return both standard and alias field names."""
+    from backend.app.api.routes import STATE
+    from backend.app.core.synthetic_data_generator import generate_demo_dataset
+    pr, g2b = generate_demo_dataset()
+    STATE["purchase_register"] = pr
+    STATE["gstr_2b_records"] = g2b
+    client.post("/api/reconcile")
+
     response = client.get("/api/vendor-scorecards")
     assert response.status_code == 200
     data = response.json()

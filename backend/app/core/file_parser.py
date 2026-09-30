@@ -25,16 +25,19 @@ from .gst_reconciliation import InvoiceRecord, validate_gstin_checksum
 
 # Standard header aliases
 ALIAS_MAP = {
-    "invoice_number": ["invoice_number", "invoice_no", "inv_no", "inv_num", "bill_no", "invoice no", "inv no", "invoice #"],
-    "invoice_date": ["invoice_date", "date", "inv_date", "bill_date", "invoice date"],
-    "supplier_gstin": ["supplier_gstin", "seller_gstin", "vendor_gstin", "gstin_supplier", "gstin of supplier", "supplier gstin", "gstin"],
-    "supplier_name": ["supplier_name", "vendor_name", "party_name", "supplier", "vendor", "trade_name", "name of supplier"],
-    "buyer_gstin": ["buyer_gstin", "recipient_gstin", "customer_gstin", "gstin_recipient", "buyer gstin"],
-    "taxable_value": ["taxable_value", "taxable_amount", "taxable_val", "taxable value", "taxable amt", "base_amount"],
-    "igst": ["igst", "igst_amount", "igst_amt", "integrated_tax", "integrated tax"],
-    "cgst": ["cgst", "cgst_amount", "cgst_amt", "central_tax", "central tax"],
-    "sgst": ["sgst", "sgst_amount", "sgst_amt", "state_tax", "state tax"],
+    "invoice_number": ["invoice_number", "invoice_no", "inv_no", "inv_num", "bill_no", "invoice no", "inv no", "invoice #", "invoice", "invoice_id"],
+    "invoice_date": ["invoice_date", "date", "inv_date", "bill_date", "invoice date", "inv date"],
+    "supplier_gstin": ["supplier_gstin", "seller_gstin", "vendor_gstin", "gstin_supplier", "gstin of supplier", "supplier gstin", "gstin", "vendor gstin", "supplier_gst"],
+    "supplier_name": ["supplier_name", "vendor_name", "party_name", "supplier", "vendor", "trade_name", "name of supplier", "party", "vendor trade name"],
+    "buyer_gstin": ["buyer_gstin", "recipient_gstin", "customer_gstin", "gstin_recipient", "buyer gstin", "recipient gstin"],
+    "taxable_value": ["taxable_value", "taxable_amount", "taxable_val", "taxable value", "taxable amt", "base_amount", "taxable", "taxable amt inr", "taxable amount inr"],
+    "igst": ["igst", "igst_amount", "igst_amt", "integrated_tax", "integrated tax", "integrated_tax_amount", "igst inr", "igst(inr)"],
+    "cgst": ["cgst", "cgst_amount", "cgst_amt", "central_tax", "central tax", "central_tax_amount", "cgst inr", "cgst(inr)"],
+    "sgst": ["sgst", "sgst_amount", "sgst_amt", "state_tax", "state tax", "state_tax_amount", "sgst inr", "sgst(inr)", "utgst"],
     "cess": ["cess", "cess_amount", "cess_amt"],
+    "total_tax": ["total_tax", "tax_amount", "tax_amt", "total tax", "tax", "gst_amount", "total gst", "gst", "tax value", "total tax amount"],
+    "total_amount": ["total_amount", "invoice_amount", "invoice_value", "inv_value", "total", "invoice amount", "inv amount", "grand_total", "total val", "bill amount"],
+    "tax_rate": ["rate", "tax_rate", "gst_rate", "rate_%", "gst_%", "tax_%", "rate in %", "tax rate"],
     "hsn_code": ["hsn_code", "hsn", "hsn/sac", "sac", "hsn_sac"],
     "filing_period": ["filing_period", "period", "return_period", "month", "tax_period"]
 }
@@ -98,8 +101,33 @@ def parse_raw_data_to_records(
         cgst = _parse_float(mapped.get("cgst", 0.0))
         sgst = _parse_float(mapped.get("sgst", 0.0))
         cess = _parse_float(mapped.get("cess", 0.0))
+        total_tax_col = _parse_float(mapped.get("total_tax", 0.0))
+        total_amount_col = _parse_float(mapped.get("total_amount", 0.0))
+        tax_rate_col = _parse_float(mapped.get("tax_rate", 0.0))
         hsn = str(mapped.get("hsn_code", "8471")).strip()
         period = str(mapped.get("filing_period", "2026-04")).strip()
+
+        # If separate tax heads are missing or 0, derive from total_tax, total_amount, or tax_rate
+        if igst == 0.0 and cgst == 0.0 and sgst == 0.0:
+            derived_tax = 0.0
+            if total_tax_col > 0.0:
+                derived_tax = total_tax_col
+            elif total_amount_col > taxable_val and taxable_val > 0.0:
+                derived_tax = round(total_amount_col - taxable_val, 2)
+            elif tax_rate_col > 0.0 and taxable_val > 0.0:
+                derived_tax = round(taxable_val * (tax_rate_col / 100.0), 2)
+
+            if derived_tax > 0.0:
+                supplier_state = supplier_gstin[:2] if len(supplier_gstin) >= 2 else ""
+                buyer_state = buyer_gstin[:2] if len(buyer_gstin) >= 2 else ""
+                # Intrastate: split into CGST + SGST; Interstate: IGST
+                if supplier_state and buyer_state and supplier_state == buyer_state:
+                    cgst = round(derived_tax / 2.0, 2)
+                    sgst = round(derived_tax - cgst, 2)
+                else:
+                    igst = derived_tax
+
+        total_amount = total_amount_col if total_amount_col > 0.0 else round(taxable_val + igst + cgst + sgst + cess, 2)
 
         # Build InvoiceRecord
         rec = InvoiceRecord(
@@ -113,6 +141,7 @@ def parse_raw_data_to_records(
             cgst=cgst,
             sgst=sgst,
             cess=cess,
+            total_amount=total_amount,
             hsn_code=hsn,
             filing_period=period
         )

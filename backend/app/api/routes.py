@@ -8,10 +8,12 @@ from __future__ import annotations
 
 import time
 import os
+import io
+import csv
 import random
 from typing import Any, Dict, List, Optional
 from fastapi import APIRouter, HTTPException, BackgroundTasks, Query, UploadFile, File
-from fastapi.responses import FileResponse
+from fastapi.responses import FileResponse, Response
 from pydantic import BaseModel
 
 from ..core.gst_reconciliation import GSTReconciliationEngine, InvoiceRecord, MismatchType, DiscrepancyResult
@@ -150,79 +152,88 @@ def get_demo_data():
     }
 
 
+@router.get("/sample/purchase-register.csv")
+def download_sample_pr():
+    """Generates and serves downloadable sample Purchase Register CSV."""
+    pr, _ = generate_demo_dataset()
+    output = io.StringIO()
+    writer = csv.writer(output)
+    writer.writerow(["invoice_number", "invoice_date", "supplier_gstin", "supplier_name", "buyer_gstin", "taxable_value", "cgst", "sgst", "igst", "cess", "total_amount", "hsn_code", "filing_period"])
+    for r in pr:
+        writer.writerow([r.invoice_number, r.invoice_date, r.supplier_gstin, r.supplier_name, r.buyer_gstin, r.taxable_value, r.cgst, r.sgst, r.igst, r.cess, r.compute_total(), r.hsn_code, r.filing_period])
+    return Response(
+        content=output.getvalue(),
+        media_type="text/csv",
+        headers={"Content-Disposition": "attachment; filename=purchase_register.csv"}
+    )
+
+
+@router.get("/sample/gstr-2b.csv")
+def download_sample_g2b():
+    """Generates and serves downloadable sample GSTR-2B CSV."""
+    _, g2b = generate_demo_dataset()
+    output = io.StringIO()
+    writer = csv.writer(output)
+    writer.writerow(["invoice_number", "invoice_date", "supplier_gstin", "supplier_name", "buyer_gstin", "taxable_value", "cgst", "sgst", "igst", "cess", "total_amount", "hsn_code", "filing_period"])
+    for r in g2b:
+        writer.writerow([r.invoice_number, r.invoice_date, r.supplier_gstin, r.supplier_name, r.buyer_gstin, r.taxable_value, r.cgst, r.sgst, r.igst, r.cess, r.compute_total(), r.hsn_code, r.filing_period])
+    return Response(
+        content=output.getvalue(),
+        media_type="text/csv",
+        headers={"Content-Disposition": "attachment; filename=gstr2b.csv"}
+    )
+
+
 @router.post("/reconcile")
-async def run_reconciliation(
-    pr_file: Optional[UploadFile] = File(None),
-    g2b_file: Optional[UploadFile] = File(None),
-    purchase_register: Optional[UploadFile] = File(None),
-    gstr2b: Optional[UploadFile] = File(None),
-):
+def run_reconciliation():
     """
     Executes 100% deterministic reconciliation between Purchase Register and GSTR-2B.
-    Accepts uploaded files (via pr_file/g2b_file or purchase_register/gstr2b) or uses demo dataset.
-    Zero LLM arithmetic.
+    Zero LLM arithmetic. Uses user uploaded records from STATE or demo dataset.
     """
-    t0 = time.monotonic()
+    pr = STATE.get("purchase_register")
+    g2b = STATE.get("gstr_2b_records")
 
-    # Resolve files if provided
-    pr_upload = pr_file or purchase_register
-    g2b_upload = g2b_file or gstr2b
-
-    if pr_upload and g2b_upload:
-        pr_content = await pr_upload.read()
-        g2b_content = await g2b_upload.read()
-        pr, pr_failed = parse_file_content(pr_content, pr_upload.filename or "purchase_register.csv")
-        g2b, g2b_failed = parse_file_content(g2b_content, g2b_upload.filename or "gstr_2b.csv")
-        if not pr:
-            raise HTTPException(status_code=400, detail=f"No valid records found in Purchase Register ({pr_upload.filename})")
-        if not g2b:
-            raise HTTPException(status_code=400, detail=f"No valid records found in GSTR-2B ({g2b_upload.filename})")
-    else:
+    if not pr or not g2b:
         pr, g2b = generate_demo_dataset()
+        STATE["purchase_register"] = pr
+        STATE["gstr_2b_records"] = g2b
 
+    t0 = time.monotonic()
     discrepancies = engine.reconcile(pr, g2b)
     elapsed_ms = (time.monotonic() - t0) * 1000
 
-    STATE["purchase_register"] = pr
-    STATE["gstr_2b_records"] = g2b
     STATE["discrepancies"] = discrepancies
     STATE["status"] = "RECONCILED"
 
-    disc_dicts = [_serialize_discrepancy(d) for d in discrepancies]
-    total_exposure = sum(d.itc_exposure_rupees for d in discrepancies)
-    matched_count = len(pr) - len(discrepancies)
-
-    # Populate Human Gate queue for high-value or low-confidence discrepancies
+    gate.clear()
     for d in discrepancies:
-        if d.requires_human_gate or d.is_high_value:
+        if d.requires_human_gate or d.is_high_value or d.mismatch_type == MismatchType.MALFORMED_INPUT:
             gate.evaluate(
-                mismatch_id=d.invoice_number,
-                confidence_score=0.95 if d.mismatch_type == MismatchType.EXACT_MATCH else 0.80,
-                itc_risk_rupees=d.itc_exposure_rupees,
-                explanation=d.details,
-                rule_citation=d.rule_citation,
-                proposed_action="DISPATCH_STATUTORY_NUDGE"
+                mismatch_record={
+                    "invoice_number": d.invoice_number,
+                    "supplier_gstin": d.supplier_gstin,
+                    "supplier_name": d.supplier_name,
+                    "mismatch_type": d.mismatch_type.value,
+                    "itc_exposure_rupees": d.itc_exposure_rupees,
+                    "details": d.details,
+                    "severity": d.severity.value
+                },
+                pipeline_result={"confidence": 0.95, "root_cause_code": d.mismatch_type.value}
             )
 
-    stats = {
-        "totalInvoices": len(pr),
-        "matched": matched_count,
-        "discrepancies": len(discrepancies),
-        "exposureRisk": total_exposure,
-        "exposureRecovered": 0,
-        "pendingHumanGate": gate.pending_count,
-    }
+    disc_dicts = [_serialize_discrepancy(d) for d in discrepancies]
+    total_exposure = sum(d.itc_exposure_rupees for d in discrepancies)
 
     return {
         "execution_time_ms": round(elapsed_ms, 2),
         "purchase_register_count": len(pr),
         "gstr_2b_count": len(g2b),
-        "matched_count": matched_count,
+        "matched_count": len(pr) - len(discrepancies),
         "discrepancies_count": len(discrepancies),
         "total_itc_exposure_rupees": total_exposure,
         "high_value_count": sum(1 for d in discrepancies if d.is_high_value),
-        "discrepancies": disc_dicts,
-        "stats": stats
+        "human_gate_pending": gate.pending_count,
+        "discrepancies": disc_dicts
     }
 
 
@@ -361,6 +372,22 @@ async def upload_and_reconcile(
     STATE["discrepancies"] = discrepancies
     STATE["status"] = "RECONCILED"
 
+    gate.clear()
+    for d in discrepancies:
+        if d.requires_human_gate or d.is_high_value or d.mismatch_type == MismatchType.MALFORMED_INPUT:
+            gate.evaluate(
+                mismatch_record={
+                    "invoice_number": d.invoice_number,
+                    "supplier_gstin": d.supplier_gstin,
+                    "supplier_name": d.supplier_name,
+                    "mismatch_type": d.mismatch_type.value,
+                    "itc_exposure_rupees": d.itc_exposure_rupees,
+                    "details": d.details,
+                    "severity": d.severity.value
+                },
+                pipeline_result={"confidence": 0.95, "root_cause_code": d.mismatch_type.value}
+            )
+
     disc_dicts = [_serialize_discrepancy(d) for d in discrepancies]
 
     return {
@@ -373,6 +400,7 @@ async def upload_and_reconcile(
         "discrepancies_count": len(discrepancies),
         "total_itc_exposure_rupees": sum(d.itc_exposure_rupees for d in discrepancies),
         "high_value_count": sum(1 for d in discrepancies if d.is_high_value),
+        "human_gate_pending": gate.pending_count,
         "failed_pr_rows": len(pr_failed),
         "failed_g2b_rows": len(g2b_failed),
         "discrepancies": disc_dicts
@@ -386,13 +414,31 @@ async def run_statutory_audit(req: Optional[AuditRequest] = None):
     Runs the deterministic statutory compliance audit
     through AuditService, routing through the Human Gate.
     """
-    if not STATE["purchase_register"] or not STATE["gstr_2b_records"]:
-        pr, g2b = generate_demo_dataset()
-        STATE["purchase_register"] = pr
-        STATE["gstr_2b_records"] = g2b
-    else:
-        pr = STATE["purchase_register"]
-        g2b = STATE["gstr_2b_records"]
+    pr = STATE.get("purchase_register", [])
+    g2b = STATE.get("gstr_2b_records", [])
+
+    if not pr or not g2b:
+        return {
+            "processed": 0,
+            "matched": 0,
+            "mismatched": 0,
+            "itc_exposure": 0.0,
+            "risk_level": "LOW",
+            "human_review_required": 0,
+            "execution_engine": "DETERMINISTIC_STATUTORY",
+            "audited_count": 0,
+            "human_gate_pending": 0,
+            "wall_clock_ms": 0.0,
+            "summary": "No user records uploaded yet.",
+            "results": [],
+            "findings": [],
+            "evidence": [],
+            "gate_summary": {"total_flagged": 0, "approved": 0, "rejected": 0, "pending": 0},
+            "rule86b_applicable": False,
+            "is_rule86b_compliant": True,
+            "section16_4_risk_count": 0,
+            "r86b_ratio": 0.0
+        }
 
     filter_invs = req.invoice_numbers if req else None
     audit_output = await audit_svc.execute_audit(pr, g2b, filter_invoices=filter_invs)
@@ -423,11 +469,41 @@ async def run_statutory_audit(req: Optional[AuditRequest] = None):
 @router.get("/human-gate/queue")
 def get_human_gate_queue():
     """Lists all items pending or resolved in the Human-in-the-Loop review queue."""
+    if not STATE.get("purchase_register") or not STATE.get("discrepancies"):
+        gate.clear()
+        return {
+            "pending_count": 0,
+            "total_count": 0,
+            "queue": []
+        }
     return {
         "pending_count": gate.pending_count,
         "total_count": gate.total_count,
         "queue": gate.list_all()
     }
+
+
+@router.post("/human-gate/clear")
+def clear_human_gate_queue():
+    """Clears all entries from the human gate queue."""
+    gate.clear()
+    return {
+        "success": True,
+        "message": "Human gate queue cleared",
+        "pending_count": 0
+    }
+
+
+@router.post("/state/reset")
+def reset_system_state():
+    """Resets all in-memory audit state, records, discrepancies, and human review gates to zero."""
+    STATE["purchase_register"] = []
+    STATE["gstr_2b_records"] = []
+    STATE["discrepancies"] = []
+    STATE["audit_results"] = {}
+    STATE["status"] = "INITIALIZED"
+    gate.clear()
+    return {"success": True, "message": "System state reset to zero", "pending_count": 0}
 
 
 @router.post("/human-gate/decide")
@@ -905,29 +981,19 @@ async def explain_discrepancy_by_invoice(req: DiscrepancyExplainRequest):
     Generates explanation and bilingual vendor nudges for a specific discrepancy
     using its deterministic engine values.
     """
-    discrepancies = STATE.get("discrepancies")
-    if not discrepancies:
-        pr, g2b = generate_demo_dataset()
-        STATE["purchase_register"] = pr
-        STATE["gstr_2b_records"] = g2b
-        discrepancies = engine.reconcile(pr, g2b)
-        STATE["discrepancies"] = discrepancies
-
+    discrepancies = STATE.get("discrepancies", [])
     target = next((d for d in discrepancies if d.invoice_number == req.invoice_number), None)
     if not target:
-        # Fallback to demo invoice if not in active list
-        target_dict = {
-            "invoice_number": req.invoice_number,
-            "vendor_gstin": "27AABCR1234F1ZS",
-            "vendor_name": "M/s Rajesh Traders",
-            "reconciliation_outcome": "MISSING_IN_2B",
-            "root_cause_code": "MISSING_IN_2B",
-            "itc_exposure": 42500.0,
-            "status": "UNRESOLVED",
-            "matched_gstr2b_record": None,
-            "details": "Invoice not found in GSTR-2B statement."
-        }
-        exp_req = ExplanationRequest(**target_dict)
+        exp_req = ExplanationRequest(
+            invoice_number=req.invoice_number,
+            vendor_name="Vendor",
+            buyer_gstin=BUYER_GSTIN,
+            reconciliation_outcome="UNDER_REVIEW",
+            root_cause_code="MISSING_IN_2B",
+            itc_exposure=0.0,
+            status="UNRESOLVED",
+            details=f"Statutory compliance review for invoice {req.invoice_number}."
+        )
     else:
         exp_req = ExplanationRequest(
             invoice_number=target.invoice_number,
@@ -1224,14 +1290,22 @@ def _compute_vendor_compliance_score(
 @router.get("/vendor-scorecards")
 def get_vendor_scorecards():
     """
-    Generates vendor compliance health scorecards.
+    Generates vendor compliance health scorecards strictly from user uploaded records.
     Compliance Score uses the explainable VCS formula:
       VCS = 100 - (0.45*S_exposure + 0.35*S_frequency + 0.20*S_aging)
-    Demo data reflects the actual 45-invoice dataset mismatch state.
     """
-    # Reconcile current dataset to get actual mismatch state
-    pr, g2b = generate_demo_dataset()
-    discrepancies = engine.reconcile(pr, g2b)
+    pr = STATE.get("purchase_register", [])
+    if not pr:
+        return {
+            "total_vendors": 0,
+            "high_risk_count": 0,
+            "medium_risk_count": 0,
+            "low_risk_count": 0,
+            "score_formula": "VCS = 100 - (0.45*S_exposure + 0.35*S_frequency + 0.20*S_aging)",
+            "scorecards": []
+        }
+
+    discrepancies = STATE.get("discrepancies", [])
 
     # Build per-vendor mismatch lookup from current reconciliation run
     vendor_mismatches: Dict[str, dict] = {}
@@ -1241,30 +1315,31 @@ def get_vendor_scorecards():
             vendor_mismatches[gstin] = {"count": 0, "itc": 0.0, "days": 0.0}
         vendor_mismatches[gstin]["count"] += 1
         vendor_mismatches[gstin]["itc"] += d.itc_exposure_rupees
-        # Assign representative days open per mismatch type for demo dataset
         days_map = {"MISSING_IN_2B": 22, "VALUE_MISMATCH": 14, "HSN_MISMATCH": 8, "GSTIN_MISMATCH": 12}
         vendor_mismatches[gstin]["days"] = max(
             vendor_mismatches[gstin]["days"],
             float(days_map.get(d.mismatch_type.value, 0))
         )
 
-    # Count invoices per vendor in purchase register
+    # Count invoices and calculate total invoiced value per vendor from actual Purchase Register
     vendor_invoice_counts: Dict[str, int] = {}
     vendor_total_value: Dict[str, float] = {}
+    vendor_names: Dict[str, str] = {}
     for r in pr:
         g = r.supplier_gstin
         vendor_invoice_counts[g] = vendor_invoice_counts.get(g, 0) + 1
         vendor_total_value[g] = vendor_total_value.get(g, 0.0) + r.compute_total()
+        if g not in vendor_names or (r.supplier_name and vendor_names[g] == g):
+            vendor_names[g] = r.supplier_name or g
 
     scorecards = []
-    for v in SAMPLE_VENDORS:
-        gstin = v["gstin"]
+    for gstin, total_inv in vendor_invoice_counts.items():
+        vname = vendor_names.get(gstin, gstin)
         mdata = vendor_mismatches.get(gstin, {})
         mismatched = mdata.get("count", 0)
         itc_blocked = mdata.get("itc", 0.0)
         avg_days = mdata.get("days", 0.0)
-        total_inv = vendor_invoice_counts.get(gstin, 5)  # default for vendors with no mismatch in demo
-        total_val = vendor_total_value.get(gstin, 500000.0)
+        total_val = vendor_total_value.get(gstin, 0.0)
 
         vcs = _compute_vendor_compliance_score(
             unresolved_itc=itc_blocked,
@@ -1275,16 +1350,16 @@ def get_vendor_scorecards():
         )
 
         if mismatched > 0:
-            status = f"{mismatched} discrepancy(ies) — ITC at risk: Rs. {itc_blocked:,.0f}"
+            status = f"{mismatched} discrepancy(ies) — ITC at risk: ₹{itc_blocked:,.0f}"
         else:
             status = "Fully Compliant"
 
         scorecards.append({
-            "vendor_name": v["name"],
-            "supplier_name": v["name"],
+            "vendor_name": vname,
+            "supplier_name": vname,
             "gstin": gstin,
             "supplier_gstin": gstin,
-            "state": v["state"],
+            "state": gstin[:2] if len(gstin) >= 2 else "NA",
             "compliance_score": vcs["score"],
             "risk_tier": vcs["tier"],
             "risk_level": vcs["tier"],
@@ -1298,8 +1373,8 @@ def get_vendor_scorecards():
             "discrepancy_count": mismatched,
             "mismatched_invoices": mismatched,
             "status": status,
-            "phone": v["phone"],
-            "email": v["email"]
+            "phone": "+91 98000 00000",
+            "email": f"compliance@{gstin.lower()[:10]}.in"
         })
 
     scorecards.sort(key=lambda x: x["compliance_score"])
