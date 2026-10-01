@@ -52,10 +52,11 @@ export default function LandingPage({ onEnterApp, onOpenAuth, session }) {
     try {
       setAuthLoading(true);
       setAuthError(null);
+      const redirectUrl = window.location.origin.replace(/\/+$/, '');
       const { error } = await supabase.auth.signInWithOAuth({
         provider: 'google',
         options: {
-          redirectTo: window.location.origin
+          redirectTo: redirectUrl
         }
       });
       if (error) throw error;
