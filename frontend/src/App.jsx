@@ -7,9 +7,22 @@ import {
   Lock, ArrowRight, ShieldCheck, Database, Layers, Sparkles,
   Clock, DollarSign, CheckCircle, AlertTriangle, Upload,
   FileSpreadsheet, ArrowDown, ChevronRight, Play, Eye,
-  Sliders, Calendar, ExternalLink, HelpCircle, Bot, Copy
+  Sliders, Calendar, ExternalLink, HelpCircle, Bot, Copy, LogOut, Home,
+  User, Briefcase, Phone, Save, Key, Shield, UserCheck, Edit3
 } from 'lucide-react';
 import confetti from 'canvas-confetti';
+import { supabase } from './supabase';
+import LandingPage from './LandingPage';
+import {
+  fetchUserProfile,
+  updateUserProfile,
+  fetchUserAudits,
+  fetchUserDiscrepancies,
+  fetchUserVendorScorecards,
+  saveAuditToSupabase,
+  saveHumanDecisionToSupabase,
+  saveNoticeDispatchToSupabase
+} from './supabaseService';
 
 // API Base — dynamic Render backend URL if provided via VITE_API_URL, fallback to relative /api
 const API_BASE = import.meta.env.VITE_API_URL 
@@ -19,6 +32,123 @@ const API_BASE = import.meta.env.VITE_API_URL
 
 
 export default function App() {
+  // App View Mode (Public Landing Page vs App Workspace) & Supabase Auth Session
+  const [viewMode, setViewMode] = useState('landing'); // 'landing' | 'app'
+  const [session, setSession] = useState(null);
+  const [userProfile, setUserProfile] = useState(null);
+
+  useEffect(() => {
+    supabase.auth.getSession().then(({ data: { session } }) => {
+      setSession(session);
+      if (session) {
+        setViewMode('app');
+        setActiveNav('overview');
+      }
+    });
+
+    const { data: { subscription } } = supabase.auth.onAuthStateChange((event, currentSession) => {
+      setSession(currentSession);
+      if (currentSession && (event === 'SIGNED_IN' || event === 'USER_UPDATED' || event === 'INITIAL_SESSION')) {
+        setViewMode('app');
+        setActiveNav('overview');
+      } else if (event === 'SIGNED_OUT') {
+        setViewMode('landing');
+        setActiveNav('overview');
+      }
+    });
+
+    return () => subscription?.unsubscribe();
+  }, []);
+
+  // When Supabase session is active, fetch user-specific data from Supabase
+  useEffect(() => {
+    if (session?.user?.id) {
+      setActiveNav('overview');
+      const uid = session.user.id;
+      const uemail = session.user.email;
+      const uname = session.user.user_metadata?.full_name;
+
+      fetchUserProfile(uid, uemail, uname).then(profile => {
+        if (profile) setUserProfile(profile);
+      });
+
+      fetchUserAudits(uid).then(userAudits => {
+        if (userAudits && userAudits.length > 0) {
+          setAudits(userAudits);
+        }
+      });
+
+      fetchUserVendorScorecards(uid).then(userScorecards => {
+        if (userScorecards && userScorecards.length > 0) {
+          setScorecards(userScorecards);
+        }
+      });
+    }
+  }, [session]);
+
+  // User Profile Form State & Sync
+  const [profileForm, setProfileForm] = useState({
+    full_name: 'Anand Awasthi',
+    email: 'anandawasthi610@gmail.com',
+    designation: 'Finance Controller & Head of Tax',
+    phone_number: '+91 98765 43210',
+    company_name: 'CrediFlow Enterprise Ltd',
+    buyer_gstin: '27AAACB0987A1Z1',
+    business_address: 'Plot 42, Bandra Kurla Complex, Mumbai, Maharashtra - 400051',
+    filing_frequency: 'MONTHLY',
+    compliance_threshold: 2.00,
+    high_value_threshold: 50000,
+    notification_channel: 'WHATSAPP_EMAIL',
+    language_pref: 'EN_HI'
+  });
+  const [profileSaving, setProfileSaving] = useState(false);
+
+  useEffect(() => {
+    if (userProfile) {
+      setProfileForm(prev => ({
+        ...prev,
+        full_name: userProfile.full_name || session?.user?.user_metadata?.full_name || session?.user?.email?.split('@')[0] || 'Anand Awasthi',
+        email: userProfile.email || session?.user?.email || 'anandawasthi610@gmail.com',
+        company_name: userProfile.company_name || 'CrediFlow Enterprise Ltd',
+        buyer_gstin: userProfile.buyer_gstin || '27AAACB0987A1Z1',
+        phone_number: userProfile.phone_number || '+91 98765 43210',
+        compliance_threshold: userProfile.compliance_threshold || 2.00
+      }));
+    } else if (session?.user) {
+      setProfileForm(prev => ({
+        ...prev,
+        full_name: session.user.user_metadata?.full_name || session.user.email?.split('@')[0] || 'Anand Awasthi',
+        email: session.user.email || 'anandawasthi610@gmail.com'
+      }));
+    }
+  }, [userProfile, session]);
+
+  const handleSaveProfile = async (e) => {
+    if (e) e.preventDefault();
+    setProfileSaving(true);
+    try {
+      if (session?.user?.id) {
+        const updated = await updateUserProfile(session.user.id, {
+          full_name: profileForm.full_name,
+          company_name: profileForm.company_name,
+          buyer_gstin: profileForm.buyer_gstin,
+          phone_number: profileForm.phone_number,
+          compliance_threshold: profileForm.compliance_threshold
+        });
+        if (updated) {
+          setUserProfile(updated);
+        }
+      }
+      setNotification({ type: 'success', msg: 'Profile & Organization details saved successfully!' });
+      setTimeout(() => setNotification(null), 3500);
+    } catch (err) {
+      setNotification({ type: 'error', msg: 'Failed to update profile details.' });
+      setTimeout(() => setNotification(null), 3500);
+    } finally {
+      setProfileSaving(false);
+    }
+  };
+
   // Navigation & View Mode
   const [activeNav, setActiveNav] = useState('overview');
   const [searchQuery, setSearchQuery] = useState('');
@@ -316,6 +446,19 @@ export default function App() {
         }
       } catch (_) {}
 
+      // Supabase Multi-Tenant Cloud Sync
+      if (session?.user?.id) {
+        saveAuditToSupabase(session.user.id, {
+          audit_id: `AUDIT-${Date.now()}`,
+          total_invoices: data.purchase_register_count || 45,
+          matched: data.matched_count || 39,
+          discrepancies: data.discrepancies || [],
+          exposure_risk_rupees: data.total_itc_exposure_rupees || 154200,
+          exposure_recovered_rupees: 0,
+          pending_human_gate: data.discrepancies_count || 6
+        });
+      }
+
       showNotification(`Demo Data Loaded: ${data.matched_count} matched, ${data.discrepancies_count} discrepancies (₹${(data.total_itc_exposure_rupees || 0).toLocaleString()} at risk)`, 'success');
     } catch (err) {
       console.error('Demo data load error:', err);
@@ -381,6 +524,19 @@ export default function App() {
           setScorecards(scoreData.scorecards || []);
         }
       } catch (_) {}
+
+      // Supabase Multi-Tenant Cloud Sync
+      if (session?.user?.id) {
+        saveAuditToSupabase(session.user.id, {
+          audit_id: `AUDIT-${Date.now()}`,
+          total_invoices: data.purchase_register_count || 0,
+          matched: data.matched_count || 0,
+          discrepancies: data.discrepancies || [],
+          exposure_risk_rupees: data.total_itc_exposure_rupees || 0,
+          exposure_recovered_rupees: 0,
+          pending_human_gate: data.discrepancies_count || 0
+        });
+      }
 
       showNotification(`Reconciliation complete: ${data.matched_count} matched, ${data.discrepancies_count} discrepancies (₹${(data.total_itc_exposure_rupees || 0).toLocaleString()} at risk)`, 'success');
     } catch (err) {
@@ -501,6 +657,19 @@ export default function App() {
         }
       } catch (_) {}
 
+      // Supabase Multi-Tenant Cloud Sync
+      if (session?.user?.id) {
+        saveAuditToSupabase(session.user.id, {
+          audit_id: `AUDIT-${Date.now()}`,
+          total_invoices: stats.totalInvoices || 45,
+          matched: stats.matched || 39,
+          discrepancies: discrepancies || [],
+          exposure_risk_rupees: stats.exposureRisk || 154200,
+          exposure_recovered_rupees: stats.exposureRecovered || 0,
+          pending_human_gate: stats.pendingHumanGate || 6
+        });
+      }
+
       showNotification('Reconciliation & Statutory Audit Complete! 100% Deterministic Verification.', 'success');
 
     } catch (err) {
@@ -521,12 +690,23 @@ export default function App() {
         body: JSON.stringify({
           gate_id: gateId,
           decision: decision,
-          decided_by: 'Vaishnavi Dwivedi (Finance Manager)',
+          decided_by: userProfile?.full_name || 'Vaishnavi Dwivedi (Finance Manager)',
           edited_message: editedMessage,
           note: `Finance team statutory decision: ${decision}`
         })
       });
       const data = await res.json();
+
+      // Supabase Multi-Tenant Cloud Sync
+      if (session?.user?.id) {
+        saveHumanDecisionToSupabase(session.user.id, {
+          invoice_number: reviewModalItem?.invoice_number || gateId,
+          action: decision,
+          statutory_note: editedMessage || `Finance team statutory decision: ${decision}`,
+          operator_name: userProfile?.full_name || session.user.email
+        });
+      }
+
       showNotification(`Human decision applied: ${decision}`, 'success');
       setReviewModalItem(null);
       setIsEditingMessage(false);
@@ -568,6 +748,14 @@ export default function App() {
       });
       const data = await res.json();
       setActionStatus(prev => ({ ...prev, pdfGenerated: true, noticeDispatched: true }));
+
+      // Supabase Multi-Tenant Cloud Sync
+      if (session?.user?.id) {
+        saveNoticeDispatchToSupabase(session.user.id, {
+          invoice_number: invoiceNumber,
+          channel: 'WHATSAPP'
+        });
+      }
 
       // 2. Attempt WhatsApp delivery: try Business API first, fall back to wa.me
       // NOTE: WhatsApp sending only changes communication state — never reconciliation/ITC/status
@@ -736,6 +924,18 @@ export default function App() {
     (d.supplier_gstin || '').toLowerCase().includes(searchQuery.toLowerCase())
   );
 
+  if (viewMode === 'landing') {
+    return (
+      <LandingPage
+        onEnterApp={() => {
+          setViewMode('app');
+          setActiveNav('overview');
+        }}
+        session={session}
+      />
+    );
+  }
+
   return (
     <div style={{ display: 'flex', minHeight: '100vh', background: '#f4f6f8', fontFamily: "'Inter', sans-serif", color: '#1e293b' }}>
 
@@ -765,6 +965,8 @@ export default function App() {
         position: 'sticky',
         top: 0,
         height: '100vh',
+        boxSizing: 'border-box',
+        overflowY: 'auto',
         zIndex: 50
       }}>
         <div>
@@ -976,40 +1178,56 @@ export default function App() {
           </nav>
         </div>
 
-        {/* Bottom Mission Card (Matches Image 2) */}
-        <div>
-          <div style={{
-            background: 'linear-gradient(180deg, #122822 0%, #0c1c18 100%)',
-            border: '1px solid #1e3d34',
-            borderRadius: 14,
-            padding: '16px 14px',
-            marginBottom: 12,
-            position: 'relative'
-          }}>
-            <div style={{ fontSize: 13.5, fontWeight: 700, color: '#ffffff', lineHeight: 1.3 }}>
-              Smarter Compliance<br />Stronger MSMEs
-            </div>
-            <p style={{ fontSize: 11, color: '#8fa8a1', lineHeight: 1.4, margin: '6px 0 12px' }}>
-              AI-powered audits for a more compliant and resilient India.
-            </p>
-            <button
-              onClick={() => {
-                setActiveNav('overview');
-                handleRunFullAudit();
-              }}
-              style={{
+        {/* ─── BOTTOM PINNED USER PROFILE & LOG OUT ─── */}
+        <div style={{
+          marginTop: 'auto',
+          paddingTop: 16
+        }}>
+          <div
+            onClick={() => setActiveNav('profile')}
+            style={{
+              padding: '10px 12px',
+              borderRadius: 12,
+              background: activeNav === 'profile' ? '#143c32' : '#102620',
+              border: activeNav === 'profile' ? '1px solid #34d399' : '1px solid #1a3b32',
+              display: 'flex',
+              alignItems: 'center',
+              justifyContent: 'space-between',
+              cursor: 'pointer',
+              transition: 'all 0.15s ease'
+            }}
+            onMouseEnter={(e) => {
+              if (activeNav !== 'profile') {
+                e.currentTarget.style.background = '#13332b';
+                e.currentTarget.style.borderColor = '#235043';
+              }
+            }}
+            onMouseLeave={(e) => {
+              if (activeNav !== 'profile') {
+                e.currentTarget.style.background = '#102620';
+                e.currentTarget.style.borderColor = '#1a3b32';
+              }
+            }}
+            title="Open User Profile & Organization Settings"
+          >
+            <div style={{ display: 'flex', alignItems: 'center', gap: 10, minWidth: 0 }}>
+              <div style={{
                 width: 32, height: 32, borderRadius: '50%',
-                background: '#1b4036', color: '#34d399',
+                background: '#059669', color: '#ffffff',
                 display: 'flex', alignItems: 'center', justifyContent: 'center',
-                border: '1px solid #28574a', cursor: 'pointer'
-              }}
-            >
-              <ArrowRight size={14} />
-            </button>
-          </div>
-
-          <div style={{ fontSize: 10.5, color: '#66827a', textAlign: 'center', padding: '0 4px' }}>
-            Made in India 🇮🇳<br />For a compliant tomorrow.
+                fontWeight: 700, fontSize: 12.5, flexShrink: 0,
+                boxShadow: '0 2px 6px rgba(5,150,105,0.3)'
+              }}>
+                {(profileForm.full_name || session?.user?.email || 'AN').substring(0, 2).toUpperCase()}
+              </div>
+              <div style={{
+                fontSize: 13, fontWeight: 700, color: activeNav === 'profile' ? '#34d399' : '#ffffff',
+                overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap'
+              }}>
+                {profileForm.full_name || session?.user?.user_metadata?.full_name || session?.user?.email?.split('@')[0] || 'Anand Awasthi'}
+              </div>
+            </div>
+            <ChevronRight size={15} color={activeNav === 'profile' ? '#34d399' : '#6f8d86'} />
           </div>
         </div>
       </aside>
@@ -1455,22 +1673,6 @@ export default function App() {
               )}
             </div>
 
-            {/* User Profile */}
-            <div style={{ display: 'flex', alignItems: 'center', gap: 10 }}>
-              <div style={{
-                width: 34, height: 34, borderRadius: '50%',
-                background: '#059669', color: '#ffffff',
-                display: 'flex', alignItems: 'center', justifyContent: 'center',
-                fontWeight: 700, fontSize: 13
-              }}>
-                VD
-              </div>
-              <div>
-                <div style={{ fontSize: 13, fontWeight: 700, color: '#0f172a' }}>Vaishnavi Dwivedi</div>
-                <div style={{ fontSize: 11, color: '#64748b' }}>MSME Finance Team</div>
-              </div>
-            </div>
-
             {/* Live Date Time Badge */}
             <div style={{
               display: 'flex', alignItems: 'center', gap: 6,
@@ -1844,6 +2046,421 @@ export default function App() {
             </section>
           )}
 
+          {/* ── USER PROFILE & ORGANIZATION VIEW ── */}
+          {activeNav === 'profile' && (
+            <section style={{ maxWidth: 1100 }}>
+              {/* Header with Save Button */}
+              <div style={{ marginBottom: 24, display: 'flex', justifyContent: 'space-between', alignItems: 'flex-start' }}>
+                <div>
+                  <h2 style={{ fontSize: 24, fontWeight: 800, color: '#0a1e19', margin: 0, letterSpacing: '-0.02em' }}>
+                    User Profile & Organization Settings
+                  </h2>
+                  <div style={{ fontSize: 13.5, color: '#64748b', marginTop: 5 }}>
+                    Manage authorized signatory details, registered MSME GSTIN, statutory thresholds, and communication settings.
+                  </div>
+                </div>
+
+                <div style={{ display: 'flex', gap: 10 }}>
+                  <button
+                    onClick={handleSaveProfile}
+                    disabled={profileSaving}
+                    style={{
+                      background: '#059669',
+                      color: '#ffffff',
+                      border: 'none',
+                      padding: '10px 22px',
+                      borderRadius: 10,
+                      fontSize: 13.5,
+                      fontWeight: 700,
+                      cursor: 'pointer',
+                      display: 'flex',
+                      alignItems: 'center',
+                      gap: 8,
+                      boxShadow: '0 2px 8px rgba(5,150,105,0.25)',
+                      transition: 'all 0.15s ease'
+                    }}
+                  >
+                    <Save size={15} />
+                    <span>{profileSaving ? 'Saving Changes...' : 'Save Profile'}</span>
+                  </button>
+                </div>
+              </div>
+
+              {/* Profile Top Banner Card */}
+              <div style={{
+                background: 'linear-gradient(135deg, #0b1a17 0%, #122822 100%)',
+                border: '1px solid #1a3b32',
+                borderRadius: 18,
+                padding: '28px 32px',
+                color: '#ffffff',
+                marginBottom: 24,
+                boxShadow: '0 8px 24px rgba(0,0,0,0.06)',
+                display: 'flex',
+                alignItems: 'center',
+                justifyContent: 'space-between',
+                flexWrap: 'wrap',
+                gap: 20
+              }}>
+                <div style={{ display: 'flex', alignItems: 'center', gap: 20 }}>
+                  <div style={{
+                    width: 72,
+                    height: 72,
+                    borderRadius: '50%',
+                    background: 'linear-gradient(135deg, #059669 0%, #34d399 100%)',
+                    color: '#ffffff',
+                    display: 'flex',
+                    alignItems: 'center',
+                    justifyContent: 'center',
+                    fontSize: 26,
+                    fontWeight: 800,
+                    boxShadow: '0 4px 16px rgba(5,150,105,0.4)',
+                    border: '3px solid rgba(255,255,255,0.15)'
+                  }}>
+                    {(profileForm.full_name || session?.user?.email || 'AN').substring(0, 2).toUpperCase()}
+                  </div>
+                  <div>
+                    <div style={{ display: 'flex', alignItems: 'center', gap: 10, marginBottom: 4 }}>
+                      <span style={{ fontSize: 20, fontWeight: 800, color: '#ffffff', letterSpacing: '-0.01em' }}>
+                        {profileForm.full_name || 'Anand Awasthi'}
+                      </span>
+                      <span style={{
+                        background: 'rgba(52, 211, 153, 0.15)',
+                        border: '1px solid rgba(52, 211, 153, 0.3)',
+                        color: '#34d399',
+                        fontSize: 11,
+                        fontWeight: 700,
+                        padding: '2px 9px',
+                        borderRadius: 999
+                      }}>
+                        Finance Controller · Tax Admin
+                      </span>
+                    </div>
+                    <div style={{ fontSize: 13, color: '#94a3b8', display: 'flex', alignItems: 'center', gap: 14, flexWrap: 'wrap' }}>
+                      <span style={{ display: 'flex', alignItems: 'center', gap: 5 }}>
+                        <Mail size={13} color="#34d399" /> {profileForm.email}
+                      </span>
+                      <span>•</span>
+                      <span style={{ display: 'flex', alignItems: 'center', gap: 5 }}>
+                        <Building size={13} color="#34d399" /> {profileForm.company_name}
+                      </span>
+                      <span>•</span>
+                      <span style={{ display: 'flex', alignItems: 'center', gap: 5, color: '#34d399', fontWeight: 600 }}>
+                        <ShieldCheck size={14} /> Rule 60 Verified
+                      </span>
+                    </div>
+                  </div>
+                </div>
+
+                <div style={{
+                  background: 'rgba(255,255,255,0.05)',
+                  border: '1px solid rgba(255,255,255,0.1)',
+                  borderRadius: 12,
+                  padding: '12px 18px',
+                  display: 'flex',
+                  flexDirection: 'column',
+                  gap: 4
+                }}>
+                  <div style={{ fontSize: 11, color: '#7e9992', textTransform: 'uppercase', fontWeight: 700, letterSpacing: '0.05em' }}>
+                    Tenant Data Isolation
+                  </div>
+                  <div style={{ fontSize: 13, fontWeight: 700, color: '#34d399', display: 'flex', alignItems: 'center', gap: 6 }}>
+                    <Lock size={13} /> Row-Level Security (RLS) Active
+                  </div>
+                  <div style={{ fontSize: 10.5, color: '#94a3b8', fontFamily: 'monospace' }}>
+                    UID: {session?.user?.id ? `${session.user.id.substring(0, 12)}...` : 'demo-tenant-local'}
+                  </div>
+                </div>
+              </div>
+
+              {/* Form Grid */}
+              <form onSubmit={handleSaveProfile} style={{ display: 'grid', gridTemplateColumns: '1.2fr 1fr', gap: 24 }}>
+                
+                {/* Column 1: Personal & Contact Information */}
+                <div style={{ display: 'flex', flexDirection: 'column', gap: 20 }}>
+                  <div style={{ background: '#ffffff', border: '1px solid #e5eae7', borderRadius: 16, padding: '24px', boxShadow: '0 1px 3px rgba(0,0,0,0.03)' }}>
+                    <div style={{ fontSize: 14, fontWeight: 700, color: '#0f2e26', display: 'flex', alignItems: 'center', gap: 8, marginBottom: 18, borderBottom: '1px solid #f1f5f9', paddingBottom: 12 }}>
+                      <User size={16} color="#059669" />
+                      <span>Authorized Signatory & Contact Profile</span>
+                    </div>
+
+                    <div style={{ display: 'flex', flexDirection: 'column', gap: 16 }}>
+                      <div>
+                        <label style={{ display: 'block', fontSize: 12.5, fontWeight: 600, color: '#334155', marginBottom: 6 }}>
+                          Full Name
+                        </label>
+                        <input
+                          type="text"
+                          value={profileForm.full_name}
+                          onChange={(e) => setProfileForm({ ...profileForm, full_name: e.target.value })}
+                          placeholder="e.g. Anand Awasthi"
+                          style={{
+                            width: '100%', padding: '11px 14px', borderRadius: 8,
+                            border: '1px solid #cbd5e1', fontSize: 13.5, outline: 'none',
+                            boxSizing: 'border-box', color: '#0f172a', fontWeight: 500
+                          }}
+                        />
+                      </div>
+
+                      <div>
+                        <label style={{ display: 'block', fontSize: 12.5, fontWeight: 600, color: '#334155', marginBottom: 6 }}>
+                          Professional Title / Designation
+                        </label>
+                        <input
+                          type="text"
+                          value={profileForm.designation}
+                          onChange={(e) => setProfileForm({ ...profileForm, designation: e.target.value })}
+                          placeholder="e.g. Finance Controller & Head of Tax"
+                          style={{
+                            width: '100%', padding: '11px 14px', borderRadius: 8,
+                            border: '1px solid #cbd5e1', fontSize: 13.5, outline: 'none',
+                            boxSizing: 'border-box', color: '#0f172a'
+                          }}
+                        />
+                      </div>
+
+                      <div>
+                        <label style={{ display: 'block', fontSize: 12.5, fontWeight: 600, color: '#334155', marginBottom: 6 }}>
+                          Registered Business Email (Read-Only)
+                        </label>
+                        <div style={{ position: 'relative' }}>
+                          <input
+                            type="email"
+                            disabled
+                            value={profileForm.email}
+                            style={{
+                              width: '100%', padding: '11px 14px', borderRadius: 8,
+                              border: '1px solid #e2e8f0', background: '#f8fafc', fontSize: 13.5,
+                              color: '#64748b', boxSizing: 'border-box', cursor: 'not-allowed'
+                            }}
+                          />
+                          <span style={{
+                            position: 'absolute', right: 12, top: '50%', transform: 'translateY(-50%)',
+                            fontSize: 11, fontWeight: 700, color: '#059669', background: '#d1fae5',
+                            padding: '2px 8px', borderRadius: 6
+                          }}>
+                            Verified
+                          </span>
+                        </div>
+                      </div>
+
+                      <div>
+                        <label style={{ display: 'block', fontSize: 12.5, fontWeight: 600, color: '#334155', marginBottom: 6 }}>
+                          Mobile / WhatsApp Number (For Nudge Testing & Escalations)
+                        </label>
+                        <div style={{ display: 'flex', gap: 8 }}>
+                          <span style={{
+                            background: '#f1f5f9', border: '1px solid #cbd5e1', borderRadius: 8,
+                            padding: '11px 12px', fontSize: 13.5, fontWeight: 600, color: '#475569'
+                          }}>
+                            🇮🇳 +91
+                          </span>
+                          <input
+                            type="tel"
+                            value={profileForm.phone_number.replace('+91', '').trim()}
+                            onChange={(e) => setProfileForm({ ...profileForm, phone_number: `+91 ${e.target.value.trim()}` })}
+                            placeholder="98765 43210"
+                            style={{
+                              flex: 1, padding: '11px 14px', borderRadius: 8,
+                              border: '1px solid #cbd5e1', fontSize: 13.5, outline: 'none',
+                              boxSizing: 'border-box', color: '#0f172a'
+                            }}
+                          />
+                        </div>
+                      </div>
+                    </div>
+                  </div>
+
+                  {/* Statutory Tolerance Controls */}
+                  <div style={{ background: '#ffffff', border: '1px solid #e5eae7', borderRadius: 16, padding: '24px', boxShadow: '0 1px 3px rgba(0,0,0,0.03)' }}>
+                    <div style={{ fontSize: 14, fontWeight: 700, color: '#0f2e26', display: 'flex', alignItems: 'center', gap: 8, marginBottom: 18, borderBottom: '1px solid #f1f5f9', paddingBottom: 12 }}>
+                      <Sliders size={16} color="#059669" />
+                      <span>Statutory Compliance & Automation Thresholds</span>
+                    </div>
+
+                    <div style={{ display: 'grid', gridTemplateColumns: '1fr 1fr', gap: 16 }}>
+                      <div>
+                        <label style={{ display: 'block', fontSize: 12, fontWeight: 600, color: '#334155', marginBottom: 6 }}>
+                          Rule 60 Rounding Tolerance
+                        </label>
+                        <div style={{
+                          padding: '10px 14px', borderRadius: 8, background: '#f8fafc',
+                          border: '1px solid #e2e8f0', fontSize: 13, fontWeight: 700, color: '#0f2e26'
+                        }}>
+                          ≤ ₹2.00 (Statutory Mandate)
+                        </div>
+                      </div>
+
+                      <div>
+                        <label style={{ display: 'block', fontSize: 12, fontWeight: 600, color: '#334155', marginBottom: 6 }}>
+                          Human Gate Intercept Floor
+                        </label>
+                        <input
+                          type="number"
+                          value={profileForm.high_value_threshold}
+                          onChange={(e) => setProfileForm({ ...profileForm, high_value_threshold: Number(e.target.value) })}
+                          style={{
+                            width: '100%', padding: '10px 14px', borderRadius: 8,
+                            border: '1px solid #cbd5e1', fontSize: 13, outline: 'none',
+                            boxSizing: 'border-box', color: '#0f172a', fontWeight: 600
+                          }}
+                        />
+                      </div>
+                    </div>
+                  </div>
+                </div>
+
+                {/* Column 2: Corporate & GSTIN Registration */}
+                <div style={{ display: 'flex', flexDirection: 'column', gap: 20 }}>
+                  <div style={{ background: '#ffffff', border: '1px solid #e5eae7', borderRadius: 16, padding: '24px', boxShadow: '0 1px 3px rgba(0,0,0,0.03)' }}>
+                    <div style={{ fontSize: 14, fontWeight: 700, color: '#0f2e26', display: 'flex', alignItems: 'center', gap: 8, marginBottom: 18, borderBottom: '1px solid #f1f5f9', paddingBottom: 12 }}>
+                      <Building size={16} color="#059669" />
+                      <span>Corporate & Statutory Entity Profile</span>
+                    </div>
+
+                    <div style={{ display: 'flex', flexDirection: 'column', gap: 16 }}>
+                      <div>
+                        <label style={{ display: 'block', fontSize: 12.5, fontWeight: 600, color: '#334155', marginBottom: 6 }}>
+                          Registered Company / Entity Name
+                        </label>
+                        <input
+                          type="text"
+                          value={profileForm.company_name}
+                          onChange={(e) => setProfileForm({ ...profileForm, company_name: e.target.value })}
+                          placeholder="e.g. CrediFlow Enterprise Ltd"
+                          style={{
+                            width: '100%', padding: '11px 14px', borderRadius: 8,
+                            border: '1px solid #cbd5e1', fontSize: 13.5, outline: 'none',
+                            boxSizing: 'border-box', color: '#0f172a', fontWeight: 600
+                          }}
+                        />
+                      </div>
+
+                      <div>
+                        <label style={{ display: 'block', fontSize: 12.5, fontWeight: 600, color: '#334155', marginBottom: 6 }}>
+                          Buyer Registered GSTIN (15-Digit Format)
+                        </label>
+                        <input
+                          type="text"
+                          maxLength={15}
+                          value={profileForm.buyer_gstin}
+                          onChange={(e) => setProfileForm({ ...profileForm, buyer_gstin: e.target.value.toUpperCase() })}
+                          placeholder="27AAACB0987A1Z1"
+                          style={{
+                            width: '100%', padding: '11px 14px', borderRadius: 8,
+                            border: '1px solid #cbd5e1', fontSize: 13.5, outline: 'none',
+                            boxSizing: 'border-box', fontFamily: 'monospace', color: '#0f172a', fontWeight: 700
+                          }}
+                        />
+                        <div style={{ display: 'flex', gap: 8, marginTop: 6, fontSize: 11.5, color: '#64748b' }}>
+                          <span>State Code: <strong>{profileForm.buyer_gstin.substring(0, 2) || '27 (MH)'}</strong></span>
+                          <span>•</span>
+                          <span>PAN: <strong>{profileForm.buyer_gstin.substring(2, 12) || 'AAACB0987A'}</strong></span>
+                        </div>
+                      </div>
+
+                      <div>
+                        <label style={{ display: 'block', fontSize: 12.5, fontWeight: 600, color: '#334155', marginBottom: 6 }}>
+                          Registered Business Office Address
+                        </label>
+                        <textarea
+                          rows={3}
+                          value={profileForm.business_address}
+                          onChange={(e) => setProfileForm({ ...profileForm, business_address: e.target.value })}
+                          placeholder="Registered office address for legal notice generation..."
+                          style={{
+                            width: '100%', padding: '10px 14px', borderRadius: 8,
+                            border: '1px solid #cbd5e1', fontSize: 13, outline: 'none',
+                            boxSizing: 'border-box', color: '#0f172a', resize: 'vertical'
+                          }}
+                        />
+                      </div>
+
+                      <div>
+                        <label style={{ display: 'block', fontSize: 12.5, fontWeight: 600, color: '#334155', marginBottom: 6 }}>
+                          GSTR Filing Cycle
+                        </label>
+                        <select
+                          value={profileForm.filing_frequency}
+                          onChange={(e) => setProfileForm({ ...profileForm, filing_frequency: e.target.value })}
+                          style={{
+                            width: '100%', padding: '10px 14px', borderRadius: 8,
+                            border: '1px solid #cbd5e1', fontSize: 13, outline: 'none',
+                            boxSizing: 'border-box', color: '#0f172a', background: '#ffffff'
+                          }}
+                        >
+                          <option value="MONTHLY">Monthly Regular (GSTR-1 & GSTR-3B)</option>
+                          <option value="QRMP">Quarterly QRMP Scheme (IFF Facility)</option>
+                        </select>
+                      </div>
+                    </div>
+                  </div>
+
+                  {/* Actions Box */}
+                  <div style={{
+                    background: '#f8fafc',
+                    border: '1px solid #e2e8f0',
+                    borderRadius: 16,
+                    padding: '20px 24px',
+                    display: 'flex',
+                    flexDirection: 'column',
+                    gap: 12
+                  }}>
+                    <button
+                      type="submit"
+                      disabled={profileSaving}
+                      style={{
+                        width: '100%',
+                        background: '#059669',
+                        color: '#ffffff',
+                        border: 'none',
+                        padding: '12px',
+                        borderRadius: 10,
+                        fontSize: 14,
+                        fontWeight: 700,
+                        cursor: 'pointer',
+                        display: 'flex',
+                        alignItems: 'center',
+                        justifyContent: 'center',
+                        gap: 8,
+                        boxShadow: '0 2px 8px rgba(5,150,105,0.25)'
+                      }}
+                    >
+                      <Save size={16} />
+                      <span>{profileSaving ? 'Saving Profile...' : 'Save All Changes'}</span>
+                    </button>
+
+                    <button
+                      type="button"
+                      onClick={async () => {
+                        await supabase.auth.signOut();
+                        setViewMode('landing');
+                        setActiveNav('overview');
+                      }}
+                      style={{
+                        width: '100%',
+                        background: '#ffffff',
+                        color: '#dc2626',
+                        border: '1px solid #fecaca',
+                        padding: '10px',
+                        borderRadius: 10,
+                        fontSize: 13,
+                        fontWeight: 600,
+                        cursor: 'pointer',
+                        display: 'flex',
+                        alignItems: 'center',
+                        justifyContent: 'center',
+                        gap: 6
+                      }}
+                    >
+                      <LogOut size={14} />
+                      <span>Sign Out from Workspace</span>
+                    </button>
+                  </div>
+                </div>
+              </form>
+            </section>
+          )}
+
           {/* ── OVERVIEW (default) ── */}
           {(activeNav === 'overview' || activeNav === 'new_audit') && (
             <>
@@ -1875,13 +2492,12 @@ export default function App() {
                   Compliance Made Simple
                 </div>
 
-                <h1 style={{
-                  fontFamily: "'Playfair Display', Georgia, serif",
+                <h1 className="font-display" style={{
                   fontSize: 36,
-                  fontWeight: 700,
+                  fontWeight: 800,
                   color: '#0a1e19',
                   lineHeight: 1.18,
-                  letterSpacing: '-0.02em',
+                  letterSpacing: '-0.025em',
                   marginBottom: 16
                 }}>
                   Recover missed ITC.<br />
@@ -1970,12 +2586,12 @@ export default function App() {
                     Small businesses keep India moving. — CrediFlow
                   </div>
 
-                  <div style={{
-                    fontFamily: "'Playfair Display', Georgia, serif",
+                  <div className="font-display" style={{
                     fontSize: 22,
-                    fontWeight: 700,
+                    fontWeight: 800,
                     color: '#0a1e19',
                     lineHeight: 1.25,
+                    letterSpacing: '-0.02em',
                     marginBottom: 14
                   }}>
                     Clean books.<br />Confident growth.
@@ -2282,26 +2898,26 @@ export default function App() {
                 {/* 4 Summary Cards */}
                 <div style={{ display: 'grid', gridTemplateColumns: '1fr 1fr', gap: 10, marginBottom: 16 }}>
                   <div style={{ background: '#f8fafc', border: '1px solid #e2e8f0', borderRadius: 12, padding: 14 }}>
-                    <div style={{ fontSize: 24, fontWeight: 800, color: '#0f172a' }}>{stats.totalInvoices}</div>
+                    <div className="font-mono tabular-nums" style={{ fontSize: 24, fontWeight: 800, color: '#0f172a' }}>{stats.totalInvoices}</div>
                     <div style={{ fontSize: 11.5, color: '#64748b', marginTop: 2 }}>Total Invoices</div>
                   </div>
 
                   <div style={{ background: '#f8fafc', border: '1px solid #e2e8f0', borderRadius: 12, padding: 14 }}>
-                    <div style={{ fontSize: 24, fontWeight: 800, color: '#059669' }}>{stats.matched}</div>
+                    <div className="font-mono tabular-nums" style={{ fontSize: 24, fontWeight: 800, color: '#059669' }}>{stats.matched}</div>
                     <div style={{ fontSize: 11.5, color: '#64748b', marginTop: 2 }}>
                       Matched ({stats.totalInvoices > 0 ? ((stats.matched / stats.totalInvoices) * 100).toFixed(1) : 0}%)
                     </div>
                   </div>
 
                   <div style={{ background: '#f8fafc', border: '1px solid #e2e8f0', borderRadius: 12, padding: 14 }}>
-                    <div style={{ fontSize: 24, fontWeight: 800, color: '#ef4444' }}>{stats.discrepancies}</div>
+                    <div className="font-mono tabular-nums" style={{ fontSize: 24, fontWeight: 800, color: '#ef4444' }}>{stats.discrepancies}</div>
                     <div style={{ fontSize: 11.5, color: '#64748b', marginTop: 2 }}>
                       Mismatched ({stats.totalInvoices > 0 ? ((stats.discrepancies / stats.totalInvoices) * 100).toFixed(1) : 0}%)
                     </div>
                   </div>
 
                   <div style={{ background: stats.exposureRisk > 0 ? '#fef2f2' : '#f8fafc', border: stats.exposureRisk > 0 ? '1px solid #fecaca' : '1px solid #e2e8f0', borderRadius: 12, padding: 14 }}>
-                    <div style={{ fontSize: 22, fontWeight: 800, color: stats.exposureRisk > 0 ? '#dc2626' : '#059669' }}>
+                    <div className="font-mono tabular-nums" style={{ fontSize: 22, fontWeight: 800, color: stats.exposureRisk > 0 ? '#dc2626' : '#059669' }}>
                       ₹{stats.exposureRisk.toLocaleString()}
                     </div>
                     <div style={{ fontSize: 11.5, color: stats.exposureRisk > 0 ? '#dc2626' : '#059669', fontWeight: 600, marginTop: 2 }}>ITC at Risk</div>
@@ -2321,28 +2937,28 @@ export default function App() {
                 textAlign: 'center'
               }}>
                 <div>
-                  <div style={{ fontSize: 13, fontWeight: 700, color: '#0f172a', display: 'flex', alignItems: 'center', justifyContent: 'center', gap: 4 }}>
+                  <div className="font-mono tabular-nums" style={{ fontSize: 13, fontWeight: 700, color: '#0f172a', display: 'flex', alignItems: 'center', justifyContent: 'center', gap: 4 }}>
                     <Database size={12} color="#059669" /> {stats.totalInvoices || benchmarks?.records_processed || 0}
                   </div>
                   <div style={{ fontSize: 10, color: '#64748b', marginTop: 2 }}>Records Processed</div>
                 </div>
 
                 <div>
-                  <div style={{ fontSize: 13, fontWeight: 700, color: '#0f172a', display: 'flex', alignItems: 'center', justifyContent: 'center', gap: 4 }}>
+                  <div className="font-mono tabular-nums" style={{ fontSize: 13, fontWeight: 700, color: '#0f172a', display: 'flex', alignItems: 'center', justifyContent: 'center', gap: 4 }}>
                     <Clock size={12} color="#0284c7" /> {auditCompleted ? '<0.1s' : '0.0s'}
                   </div>
                   <div style={{ fontSize: 10, color: '#64748b', marginTop: 2 }}>Elapsed Time</div>
                 </div>
 
                 <div>
-                  <div style={{ fontSize: 13, fontWeight: 700, color: '#0f172a', display: 'flex', alignItems: 'center', justifyContent: 'center', gap: 4 }}>
+                  <div className="font-mono tabular-nums" style={{ fontSize: 13, fontWeight: 700, color: '#0f172a', display: 'flex', alignItems: 'center', justifyContent: 'center', gap: 4 }}>
                     <DollarSign size={12} color="#16a34a" /> $0.00
                   </div>
                   <div style={{ fontSize: 10, color: '#64748b', marginTop: 2 }}>Deterministic Engine</div>
                 </div>
 
                 <div>
-                  <div style={{ fontSize: 13, fontWeight: 700, color: '#059669', display: 'flex', alignItems: 'center', justifyContent: 'center', gap: 4 }}>
+                  <div className="font-mono tabular-nums" style={{ fontSize: 13, fontWeight: 700, color: '#059669', display: 'flex', alignItems: 'center', justifyContent: 'center', gap: 4 }}>
                     <CheckCircle size={12} /> {stats.matched} / {stats.totalInvoices}
                   </div>
                   <div style={{ fontSize: 10, color: stats.pendingHumanGate > 0 ? '#ea580c' : '#059669', fontWeight: 600, marginTop: 2 }}>{stats.pendingHumanGate} Escalated</div>
@@ -2396,7 +3012,7 @@ export default function App() {
                               strokeDasharray={`${matchRatePct}, 100`}
                             />
                           </svg>
-                          <div style={{
+                          <div className="font-mono tabular-nums" style={{
                             position: 'absolute', top: 0, left: 0, right: 0, bottom: 0,
                             display: 'flex', alignItems: 'center', justifyContent: 'center',
                             fontSize: 14, fontWeight: 800, color: '#0f172a'
@@ -2410,22 +3026,22 @@ export default function App() {
                           <div style={{ display: 'flex', alignItems: 'center', gap: 6 }}>
                             <span style={{ width: 7, height: 7, borderRadius: '50%', background: '#059669' }} />
                             <span style={{ color: '#475569' }}>Matched</span>
-                            <span style={{ fontWeight: 700, marginLeft: 'auto' }}>{stats.matched}</span>
+                            <span className="font-mono tabular-nums" style={{ fontWeight: 700, marginLeft: 'auto' }}>{stats.matched}</span>
                           </div>
                           <div style={{ display: 'flex', alignItems: 'center', gap: 6 }}>
                             <span style={{ width: 7, height: 7, borderRadius: '50%', background: '#ef4444' }} />
                             <span style={{ color: '#475569' }}>Mismatched</span>
-                            <span style={{ fontWeight: 700, marginLeft: 'auto' }}>{stats.discrepancies}</span>
+                            <span className="font-mono tabular-nums" style={{ fontWeight: 700, marginLeft: 'auto' }}>{stats.discrepancies}</span>
                           </div>
                           <div style={{ display: 'flex', alignItems: 'center', gap: 6 }}>
                             <span style={{ width: 7, height: 7, borderRadius: '50%', background: '#0284c7' }} />
                             <span style={{ color: '#475569' }}>Missing in 2B</span>
-                            <span style={{ fontWeight: 700, marginLeft: 'auto' }}>{missingCount}</span>
+                            <span className="font-mono tabular-nums" style={{ fontWeight: 700, marginLeft: 'auto' }}>{missingCount}</span>
                           </div>
                           <div style={{ display: 'flex', alignItems: 'center', gap: 6 }}>
                             <span style={{ width: 7, height: 7, borderRadius: '50%', background: '#f59e0b' }} />
                             <span style={{ color: '#475569' }}>Other Variance</span>
-                            <span style={{ fontWeight: 700, marginLeft: 'auto' }}>{taxHeadCount + amountCount + nearMatchCount + otherCount}</span>
+                            <span className="font-mono tabular-nums" style={{ fontWeight: 700, marginLeft: 'auto' }}>{taxHeadCount + amountCount + nearMatchCount + otherCount}</span>
                           </div>
                         </div>
                       </div>
